@@ -264,7 +264,7 @@ class BittensorUtility():
         sell_price_reduction_per_alpha = (sell_upper - sell_lower) / subnet_settings['max_alpha']
         for i in range(int(alpha_amount)):
             sell_at -= sell_price_reduction_per_alpha
-        return sell_at
+        return max(sell_lower, sell_at)
 
 
 
@@ -303,7 +303,7 @@ class BittensorUtility():
 
 
     def determineSlippage(self, token_amount, token_in_pool):
-        slippage = (token_amount/(token_in_pool+token_amount)) * 100.0
+        slippage = (Decimal(token_amount)/(Decimal(token_in_pool)+Decimal(token_amount))) * Decimal('100.0')
         return slippage
 
 
@@ -326,7 +326,7 @@ class BittensorUtility():
                 tao_amount = self.determineTokenBuyAmount(goal_amount_to_buy, self.stats[subnet_netuid]['tao_in'])
                 slippage = self.determineSlippage(tao_amount, self.stats[subnet_netuid]['tao_in'])
                 if Decimal(slippage) > Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY):
-                    raise Exception(f'Should never get here, stopping before purchasing too much slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)}')
+                    raise Exception(f'Stopping before purchasing too much slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)}.  \nTO FIX: increase the MAX_TAO_PER_BUY variable or increase MAX_SLIPPAGE_PERCENT_PER_BUY')
                 tao_amount = bt.utils.balance.tao(tao_amount)
                 trade = {
                     'hotkey':bagbot_settings.STAKE_ON_VALIDATOR,
@@ -360,11 +360,11 @@ class BittensorUtility():
             approx_tao = float(Decimal(self.stats[subnet_netuid]['price']) * Decimal(alpha_to_sell))
 
             if approx_tao > bagbot_settings.MAX_TAO_PER_SELL:
-                raise Exception(f'Should never get here, stopping before selling too much. approx_tao: {approx_tao}, max tao per sell: {bagbot_settings.MAX_TAO_PER_SELL}, price x alpha: {self.stats[subnet_netuid]["price"]} x {alpha_to_sell}')
+                raise Exception(f'Stopping before selling too much. approx_tao: {approx_tao}, max tao per sell: {bagbot_settings.MAX_TAO_PER_SELL}, price x alpha: {self.stats[subnet_netuid]["price"]} x {alpha_to_sell} \nTO FIX: increase the MAX_TAO_PER_SELL variable or increase MAX_SLIPPAGE_PERCENT_PER_BUY')
 
             slippage = self.determineSlippage(alpha_to_sell, self.stats[subnet_netuid]['alpha_in'])
             if Decimal(slippage) > Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY):
-                raise Exception(f'Should never get here, stopping before selling too much, slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)}')
+                raise Exception(f'Stopping before selling too much, slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)}  \nTO FIX: increase the MAX_TAO_PER_SELL variable or increase MAX_SLIPPAGE_PERCENT_PER_BUY')
 
             logger.info(f"About to unstake {alpha_to_sell} alpha (~{approx_tao} TAO) in sn{subnet_netuid} on hotkey {hotkey} with expected slippage of {slippage:.4f}%")
 

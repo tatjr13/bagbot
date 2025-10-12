@@ -1,11 +1,7 @@
 import unittest
-import utils
-import settings
 import bagbot
 import math
 
-utils.log = lambda *args : None
-utils.logAndPrint = lambda *args : None
 
 
 """
@@ -69,6 +65,7 @@ class TestBAGBot(unittest.TestCase):
         bu.stats[0] = {'price' : 0.01}
         bu.subnet_grids = {0:{'sell_lower':0.05, 'buy_upper':0.01}}
         self.assertRaises(bagbot.InvalidSettings, bu.validateGrid)
+
 
 
 
@@ -150,6 +147,39 @@ class TestBAGBot(unittest.TestCase):
         self.assertTrue(math.isclose(float(sellDict['sell_threshold']), 0.019))
 
 
+    def testSellLineOverMaxAlpha(self):
+        args = {}
+        bagbot.bagbot_settings.MAX_TAO_PER_SELL = 0.02
+        bu = bagbot.BittensorUtility(args)
+        bu.stats = {}
+        bu.stats[90] = {'price' : 0.02, 'alpha_in':10000}
+        bu.balance = 1
+        bu.current_stake_info = {'somehotkey': {90: MockStake(2000)}}
+        bu.subnet_grids = {90:{'buy_upper':0.001,
+                               'sell_lower':0.01,
+                               'sell_upper':0.02,
+                               'max_alpha':1000,
+                          }}
+        sellDict = bu.constructSell(90)
+        self.assertEqual(sellDict['netuid'], 90)
+        #0.02 TAO per sell, price of 0.02,
+        #0.02 / 0.02 = 1 alpha to sell
+        self.assertEqual(float(sellDict['alpha_amount']), 1)
+        self.assertTrue(math.isclose(float(sellDict['sell_threshold']), 0.01))
+
+
+    def testDetermineSlippagePythonBS(self):
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+
+        ratio = (0.1 + 0.2) * 0.1
+        token_amount = 1.0
+        token_in_pool = token_amount / ratio - token_amount
+        # Without fixes this returns 3.0000000000000004 instead of 3
+
+        # Compute slippage
+        slippage = bu.determineSlippage(token_amount, token_in_pool)
+        self.assertEqual(slippage, 3)
 
 
 
