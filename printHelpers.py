@@ -179,7 +179,8 @@ def print_table_rich(
         )
 
     summary = (
-        f"[bold cyan]Balance:[/bold cyan] {balance:.4f} TAO    "
+        f"[bold green]Total:[/bold green] {balance+total_stake_value:.2f} TAO    "
+        f"[bold cyan]Available:[/bold cyan] {balance:.4f} TAO    "
         f"[bold cyan]Stake Value:[/bold cyan] {total_stake_value:.4f} TAO"
     )
     console.print(Panel(summary, style="bold white"))
