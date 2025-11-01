@@ -50,11 +50,15 @@ python3 -m unittest test_bagbot.py
 
 ### Trading Strategy Implementation
 
-The bot uses a **grid trading strategy** with dynamic buy/sell thresholds:
+The bot uses a **grid trading strategy** with dynamic buy/sell thresholds using configurable power curves:
 
-1. **Buy threshold calculation** (bagbot.py:243-254): As the bot accumulates more alpha in a subnet, the buy price decreases linearly from `buy_upper` (when holding 0 alpha) to `buy_lower` (when holding `max_alpha`). This implements dollar-cost averaging.
+1. **Buy threshold calculation** (bagbot.py:288-309): As the bot accumulates more alpha in a subnet, the buy price transitions from `buy_upper` (when holding 0 alpha) to `buy_lower` (when holding `max_alpha`) according to a power curve defined by `buy_zone_power`:
+   - Formula: `buy_at = buy_upper - (buy_upper - buy_lower) * (progress ^ buy_zone_power)`
+   - `buy_zone_power = 1.0`: Linear progression (default)
+   - `buy_zone_power > 1.0`: More aggressive buying early (stays near buy_upper longer)
+   - `buy_zone_power < 1.0`: More conservative buying early (drops toward buy_lower faster)
 
-2. **Sell threshold calculation** (bagbot.py:256-267): Inversely, sell thresholds increase from `sell_lower` (at max holdings) to `sell_upper` (near zero holdings), taking profits as the position scales up.
+2. **Sell threshold calculation** (bagbot.py:311-332): Inversely, sell thresholds transition from `sell_upper` (near zero holdings) to `sell_lower` (at max holdings) using `sell_zone_power` with the same curve logic.
 
 3. **Slippage protection** (bagbot.py:305-312): Before each trade, `determineTokenBuyAmount()` calculates the maximum trade size that won't exceed `MAX_SLIPPAGE_PERCENT_PER_BUY`. Uses the formula: `max_amount = (token_in_pool * slippage%) / (1 - slippage%)`
 
@@ -74,12 +78,15 @@ The bot uses a two-tier configuration approach (bagbot_settings.py):
 - `WALLET_PW` / `WALLET_NAME` - Wallet credentials (cannot be overridden per-subnet)
 - `MAX_TAO_PER_BUY` / `MAX_TAO_PER_SELL` - Trade size limits (minimum 0.01 to avoid gas fee losses)
 - `MAX_SLIPPAGE_PERCENT_PER_BUY` - Maximum acceptable slippage per trade
+- `BUY_ZONE_POWER` / `SELL_ZONE_POWER` - Power curve exponents for price progression (default: 1.0 for linear, range: 0.1 to 10)
 
 **Per-subnet overrides** (optional, specified within each subnet in SUBNET_SETTINGS):
 - `stake_on_validator` - Use a different validator for this specific subnet
 - `max_tao_per_buy` - Custom trade size for buys on this subnet
 - `max_tao_per_sell` - Custom trade size for sells on this subnet
 - `max_slippage_percent_per_buy` - Custom slippage tolerance for this subnet
+- `buy_zone_power` - Custom power curve for buy price progression on this subnet
+- `sell_zone_power` - Custom power curve for sell price progression on this subnet
 
 The `get_subnet_setting()` method (bagbot.py:70-84) implements the override logic, checking for subnet-specific values before falling back to global defaults.
 

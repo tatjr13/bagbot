@@ -130,6 +130,15 @@ class BittensorUtility():
             if subnet_id == 0:
                 raise InvalidSettings(f'No support for {subnet_id} in bagbot_settings.SUBNET_SETTINGS.')
 
+            # Validate power curve settings if present
+            buy_zone_power = self.subnet_grids[subnet_id].get('buy_zone_power', bagbot_settings.BUY_ZONE_POWER)
+            if buy_zone_power <= 0:
+                raise InvalidSettings(f'"buy_zone_power" must be positive for subnet {subnet_id} (got {buy_zone_power})')
+
+            sell_zone_power = self.subnet_grids[subnet_id].get('sell_zone_power', bagbot_settings.SELL_ZONE_POWER)
+            if sell_zone_power <= 0:
+                raise InvalidSettings(f'"sell_zone_power" must be positive for subnet {subnet_id} (got {sell_zone_power})')
+
 
 
 
@@ -292,10 +301,20 @@ class BittensorUtility():
         if 'buy_lower' not in subnet_settings or alpha_amount == 0:
             return buy_upper
         buy_lower = subnet_settings['buy_lower']
-        buy_at = buy_upper
-        price_reduction_per_alpha = (buy_upper - buy_lower) / subnet_settings['max_alpha']
-        for i in range(int(alpha_amount)):
-            buy_at -= price_reduction_per_alpha
+        max_alpha = subnet_settings['max_alpha']
+
+        # Get power curve setting (default to global setting)
+        buy_zone_power = subnet_settings.get('buy_zone_power', bagbot_settings.BUY_ZONE_POWER)
+
+        # Calculate position in the range (0 to 1)
+        progress = min(alpha_amount / max_alpha, 1.0)
+
+        # Apply power curve
+        curve_value = progress ** buy_zone_power
+
+        # Interpolate between buy_upper and buy_lower using the curve
+        buy_at = buy_upper - (buy_upper - buy_lower) * curve_value
+
         return buy_at
 
     def determine_sell_at_for_amount(self, subnet_settings, alpha_amount):
@@ -305,10 +324,20 @@ class BittensorUtility():
         if 'sell_upper' not in subnet_settings or alpha_amount == 0:
             return sell_lower
         sell_upper = subnet_settings['sell_upper']
-        sell_at = sell_upper
-        sell_price_reduction_per_alpha = (sell_upper - sell_lower) / subnet_settings['max_alpha']
-        for i in range(int(alpha_amount)):
-            sell_at -= sell_price_reduction_per_alpha
+        max_alpha = subnet_settings['max_alpha']
+
+        # Get power curve setting (default to global setting)
+        sell_zone_power = subnet_settings.get('sell_zone_power', bagbot_settings.SELL_ZONE_POWER)
+
+        # Calculate position in the range (0 to 1)
+        progress = min(alpha_amount / max_alpha, 1.0)
+
+        # Apply power curve
+        curve_value = progress ** sell_zone_power
+
+        # Interpolate between sell_upper and sell_lower using the curve
+        sell_at = sell_upper - (sell_upper - sell_lower) * curve_value
+
         return max(sell_lower, sell_at)
 
 
