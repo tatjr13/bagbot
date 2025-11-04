@@ -84,6 +84,67 @@ class BittensorUtility():
         return default_value
 
 
+    async def discover_all_validators_with_stake(self):
+        """
+        Query the blockchain to find ALL validators where this coldkey has stake.
+
+        Returns:
+            List of validator hotkeys that have stake from this coldkey, or None if discovery fails
+        """
+        try:
+            # Try to get comprehensive stake info
+            stake_info_list = await asyncio.wait_for(
+                self.sub.get_stake_info_for_coldkey(
+                    coldkey_ss58=self.wallet.coldkey.ss58_address
+                ),
+                timeout=30.0
+            )
+
+            validators = set()
+
+            # Handle different return types
+            if stake_info_list is None:
+                logger.warning('get_stake_info_for_coldkey returned None')
+                return None
+
+            # If it's a list, iterate and extract hotkeys
+            if isinstance(stake_info_list, list):
+                for stake_info in stake_info_list:
+                    hotkey = None
+                    # Try different attribute names
+                    if hasattr(stake_info, 'hotkey_ss58'):
+                        hotkey = stake_info.hotkey_ss58
+                    elif hasattr(stake_info, 'hotkey'):
+                        hotkey = stake_info.hotkey
+
+                    if hotkey:
+                        validators.add(hotkey)
+                        logger.debug(f'Found stake on validator {hotkey}')
+            else:
+                logger.warning(f'Unexpected return type from get_stake_info_for_coldkey: {type(stake_info_list)}')
+                return None
+
+            if len(validators) > 0:
+                logger.info(f'Discovered {len(validators)} validators with stake from blockchain: {list(validators)}')
+                return list(validators)
+            else:
+                logger.warning('No validators found with stake, falling back to configured validators')
+                return None
+
+        except (AttributeError, TypeError) as e:
+            logger.warning(f'Error parsing stake info structure: {e}')
+            logger.warning('Falling back to configured validators only')
+            return None
+        except asyncio.TimeoutError:
+            logger.warning('Timeout discovering validators from blockchain')
+            logger.warning('Falling back to configured validators only')
+            return None
+        except Exception as e:
+            logger.warning(f'Could not discover validators from blockchain: {e}')
+            logger.warning(traceback.format_exc())
+            logger.warning('Falling back to configured validators only')
+            return None
+
     def get_all_validators(self):
         """
         Collect all unique validator hotkeys from global setting and per-subnet overrides.
@@ -254,9 +315,18 @@ class BittensorUtility():
             start = time.time()
             try:
                 logger.info(f'Starting tick {self.tick}')
-                # Collect all validators (global + per-subnet overrides)
-                all_validators = self.get_all_validators()
-                logger.info(f'Querying stake info for validators: {all_validators}')
+                # Try to discover ALL validators with stake from blockchain
+                discovered_validators = await self.discover_all_validators_with_stake()
+
+                if discovered_validators:
+                    # Use discovered validators for comprehensive stake info
+                    all_validators = discovered_validators
+                    logger.info(f'Using discovered validators for stake queries: {all_validators}')
+                else:
+                    # Fall back to configured validators only
+                    all_validators = self.get_all_validators()
+                    logger.info(f'Using configured validators for stake queries: {all_validators}')
+
                 await self.refresh_stats(all_validators)
 
                 logger.info(f'Tick {self.tick}: Printing table')
@@ -389,11 +459,19 @@ class BittensorUtility():
 
 
     def determineHotKey(self, unstake_amt, subnet_netuid):
-        for hotkey in self.current_stake_info:
-            stake_obj = self.current_stake_info[hotkey].get(subnet_netuid)
+        # Prioritize the configured validator for this subnet
+        configured_validator = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
+
+        # First check if configured validator has stake
+        if configured_validator in self.current_stake_info:
+            stake_obj = self.current_stake_info[configured_validator].get(subnet_netuid)
             stake = (float(stake_obj.stake) if stake_obj is not None else 0.0)
             if stake > 0:
-                return hotkey
+                return configured_validator
+
+        # If configured validator has no stake, don't sell from other validators
+        # (This prevents accidentally selling stake from validators the user doesn't want to trade on)
+        logger.warning(f'Configured validator {configured_validator} has no stake for subnet {subnet_netuid}, cannot sell')
         return None
 
 
