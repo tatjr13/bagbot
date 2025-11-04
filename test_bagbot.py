@@ -182,6 +182,68 @@ class TestBAGBot(unittest.TestCase):
         self.assertEqual(slippage, 3)
 
 
+    def testBuyPowerCurveLinear(self):
+        """Test that power curve = 1.0 gives linear behavior"""
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        bu.subnet_grids = {90:{'buy_upper':0.02,
+                               'buy_lower':0.01,
+                               'sell_lower':0.03,
+                               'max_alpha':1000,
+                               'buy_zone_power': 1.0,
+                          }}
+        # At 50% progress (500 alpha), should be at midpoint
+        buy_threshold = bu.determine_buy_at_for_amount(bu.subnet_grids[90], 500)
+        self.assertTrue(math.isclose(buy_threshold, 0.015))
+
+
+    def testBuyPowerCurveAggressive(self):
+        """Test that power curve > 1.0 keeps price higher for longer"""
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        bu.subnet_grids = {90:{'buy_upper':0.02,
+                               'buy_lower':0.01,
+                               'sell_lower':0.03,
+                               'max_alpha':1000,
+                               'buy_zone_power': 2.0,
+                          }}
+        # At 50% progress (500 alpha), with power=2.0, curve_value = 0.5^2 = 0.25
+        # buy_at = 0.02 - (0.02 - 0.01) * 0.25 = 0.02 - 0.0025 = 0.0175
+        buy_threshold = bu.determine_buy_at_for_amount(bu.subnet_grids[90], 500)
+        self.assertTrue(math.isclose(buy_threshold, 0.0175))
+
+
+    def testBuyPowerCurveConservative(self):
+        """Test that power curve < 1.0 drops price faster"""
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        bu.subnet_grids = {90:{'buy_upper':0.02,
+                               'buy_lower':0.01,
+                               'sell_lower':0.03,
+                               'max_alpha':1000,
+                               'buy_zone_power': 0.5,
+                          }}
+        # At 50% progress (500 alpha), with power=0.5, curve_value = 0.5^0.5 = ~0.707
+        # buy_at = 0.02 - (0.02 - 0.01) * 0.707 = 0.02 - 0.00707 = ~0.01293
+        buy_threshold = bu.determine_buy_at_for_amount(bu.subnet_grids[90], 500)
+        self.assertTrue(math.isclose(buy_threshold, 0.01293, rel_tol=0.001))
+
+
+    def testSellPowerCurveLinear(self):
+        """Test that power curve = 1.0 gives linear behavior for sells"""
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        bu.subnet_grids = {90:{'buy_upper':0.01,
+                               'sell_lower':0.01,
+                               'sell_upper':0.02,
+                               'max_alpha':1000,
+                               'sell_zone_power': 1.0,
+                          }}
+        # At 50% progress (500 alpha), should be at midpoint
+        sell_threshold = bu.determine_sell_at_for_amount(bu.subnet_grids[90], 500)
+        self.assertTrue(math.isclose(sell_threshold, 0.015))
+
+
 
 class MockStake:
     def __init__(self, stake):

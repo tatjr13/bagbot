@@ -82,7 +82,10 @@ def print_table_rich(
     timestamp = int(time.time())
     total_stake_value = 0.0
 
-    table = Table(title="Staking Allocations", header_style="bold white on dark_blue", box=box.SIMPLE_HEAVY)
+    from datetime import datetime
+    formatted_time = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+
+    table = Table(title=f"Staking Allocations - {formatted_time}", header_style="bold white on dark_blue", box=box.SIMPLE_HEAVY)
     table.add_column("Subnet", justify="right", style="bright_cyan")
     table.add_column("Name", justify="left", style="white")
     table.add_column("Alpha", justify="right", style="magenta")
@@ -98,7 +101,12 @@ def print_table_rich(
     table.add_column("Sell Upper", justify="right", style="grey66")
     table.add_column("Price Proximity", justify="right", style="white")
 
-    for netuid in stake_info[bagbot_settings.STAKE_ON_VALIDATOR]:
+    # Collect all unique subnet IDs across all validators
+    all_netuids = set()
+    for hotkey in stake_info:
+        all_netuids.update(stake_info[hotkey].keys())
+
+    for netuid in all_netuids:
         stake_amt = botInstance.my_current_stake(netuid)
 
         if netuid in stats:

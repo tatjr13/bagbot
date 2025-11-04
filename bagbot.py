@@ -67,6 +67,101 @@ class BittensorUtility():
         self.tick = 0
 
 
+    def get_subnet_setting(self, subnet_netuid, setting_name, default_value):
+        """
+        Get a setting for a subnet, allowing per-subnet overrides of global settings.
+
+        Args:
+            subnet_netuid: The subnet ID
+            setting_name: The name of the setting to get
+            default_value: The default (global) value if no override exists
+
+        Returns:
+            The subnet-specific override if it exists, otherwise the default value
+        """
+        if subnet_netuid in self.subnet_grids:
+            return self.subnet_grids[subnet_netuid].get(setting_name, default_value)
+        return default_value
+
+
+    async def discover_all_validators_with_stake(self):
+        """
+        Query the blockchain to find ALL validators where this coldkey has stake.
+
+        Returns:
+            List of validator hotkeys that have stake from this coldkey, or None if discovery fails
+        """
+        try:
+            # Try to get comprehensive stake info
+            stake_info_list = await asyncio.wait_for(
+                self.sub.get_stake_info_for_coldkey(
+                    coldkey_ss58=self.wallet.coldkey.ss58_address
+                ),
+                timeout=30.0
+            )
+
+            validators = set()
+
+            # Handle different return types
+            if stake_info_list is None:
+                logger.warning('get_stake_info_for_coldkey returned None')
+                return None
+
+            # If it's a list, iterate and extract hotkeys
+            if isinstance(stake_info_list, list):
+                for stake_info in stake_info_list:
+                    hotkey = None
+                    # Try different attribute names
+                    if hasattr(stake_info, 'hotkey_ss58'):
+                        hotkey = stake_info.hotkey_ss58
+                    elif hasattr(stake_info, 'hotkey'):
+                        hotkey = stake_info.hotkey
+
+                    if hotkey:
+                        validators.add(hotkey)
+                        logger.debug(f'Found stake on validator {hotkey}')
+            else:
+                logger.warning(f'Unexpected return type from get_stake_info_for_coldkey: {type(stake_info_list)}')
+                return None
+
+            if len(validators) > 0:
+                logger.info(f'Discovered {len(validators)} validators with stake from blockchain: {list(validators)}')
+                return list(validators)
+            else:
+                logger.warning('No validators found with stake, falling back to configured validators')
+                return None
+
+        except (AttributeError, TypeError) as e:
+            logger.warning(f'Error parsing stake info structure: {e}')
+            logger.warning('Falling back to configured validators only')
+            return None
+        except asyncio.TimeoutError:
+            logger.warning('Timeout discovering validators from blockchain')
+            logger.warning('Falling back to configured validators only')
+            return None
+        except Exception as e:
+            logger.warning(f'Could not discover validators from blockchain: {e}')
+            logger.warning(traceback.format_exc())
+            logger.warning('Falling back to configured validators only')
+            return None
+
+    def get_all_validators(self):
+        """
+        Collect all unique validator hotkeys from global setting and per-subnet overrides.
+
+        Returns:
+            List of unique validator hotkeys to query for stake info
+        """
+        validators = {bagbot_settings.STAKE_ON_VALIDATOR}
+
+        # Check each subnet for validator overrides
+        for subnet_config in self.subnet_grids.values():
+            if 'stake_on_validator' in subnet_config:
+                validators.add(subnet_config['stake_on_validator'])
+
+        return list(validators)
+
+
     async def setupWallet(self):
         wallet_pw = bagbot_settings.WALLET_PW
 
@@ -112,6 +207,15 @@ class BittensorUtility():
                 raise InvalidSettings(f'subnet {subnet_id} must be an integer in bagbot_settings.SUBNET_SETTINGS.  Strings or other objects are not allowed')
             if subnet_id == 0:
                 raise InvalidSettings(f'No support for {subnet_id} in bagbot_settings.SUBNET_SETTINGS.')
+
+            # Validate power curve settings if present
+            buy_zone_power = self.subnet_grids[subnet_id].get('buy_zone_power', bagbot_settings.BUY_ZONE_POWER)
+            if buy_zone_power <= 0:
+                raise InvalidSettings(f'"buy_zone_power" must be positive for subnet {subnet_id} (got {buy_zone_power})')
+
+            sell_zone_power = self.subnet_grids[subnet_id].get('sell_zone_power', bagbot_settings.SELL_ZONE_POWER)
+            if sell_zone_power <= 0:
+                raise InvalidSettings(f'"sell_zone_power" must be positive for subnet {subnet_id} (got {sell_zone_power})')
 
 
 
@@ -163,18 +267,30 @@ class BittensorUtility():
 
     async def refresh_stats(self, hotkeys):
         try:
-            self.stats = await self.get_subnet_stats()
+            logger.info('Fetching subnet stats')
+            self.stats = await asyncio.wait_for(self.get_subnet_stats(), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.error('Timeout fetching subnet stats after 30s')
+            raise
         except Exception as e:
             logger.error(traceback.format_exc())
             raise
 
         for hotkey in hotkeys:
-            self.current_stake_info[hotkey] = await self.sub.get_stake_for_coldkey_and_hotkey(
-                hotkey_ss58=hotkey,
-                coldkey_ss58=self.wallet.coldkey.ss58_address
+            logger.info(f'Fetching stake info for {hotkey}')
+            self.current_stake_info[hotkey] = await asyncio.wait_for(
+                self.sub.get_stake_for_coldkey_and_hotkey(
+                    hotkey_ss58=hotkey,
+                    coldkey_ss58=self.wallet.coldkey.ss58_address
+                ),
+                timeout=20.0
             )
 
-        self.balance = float(await self.sub.get_balance(address=self.wallet.coldkey.ss58_address))
+        logger.info('Fetching wallet balance')
+        self.balance = float(await asyncio.wait_for(
+            self.sub.get_balance(address=self.wallet.coldkey.ss58_address),
+            timeout=20.0
+        ))
 
         sumStakedValue = 0
         tickLog = []
@@ -192,14 +308,28 @@ class BittensorUtility():
 
     async def run(self):
         await self.setup()
+        await self.refresh_subnet_grid()  # Load subnet settings before first tick
 
         while True:
             self.tick += 1
             start = time.time()
             try:
-                await self.refresh_stats([bagbot_settings.STAKE_ON_VALIDATOR])
+                logger.info(f'Starting tick {self.tick}')
+                # Try to discover ALL validators with stake from blockchain
+                discovered_validators = await self.discover_all_validators_with_stake()
 
+                if discovered_validators:
+                    # Use discovered validators for comprehensive stake info
+                    all_validators = discovered_validators
+                    logger.info(f'Using discovered validators for stake queries: {all_validators}')
+                else:
+                    # Fall back to configured validators only
+                    all_validators = self.get_all_validators()
+                    logger.info(f'Using configured validators for stake queries: {all_validators}')
 
+                await self.refresh_stats(all_validators)
+
+                logger.info(f'Tick {self.tick}: Printing table')
                 printHelpers.print_table_rich(self, console, self.current_stake_info, list(bagbot_settings.SUBNET_SETTINGS.keys()), self.stats, self.balance, self.subnet_grids)
                 if self.tick == 1 and not self.args.nocheck:
                     loop = asyncio.get_event_loop()
@@ -208,13 +338,19 @@ class BittensorUtility():
                         print('Exiting...')
                         return
 
+                logger.info(f'Tick {self.tick}: Checking trades')
                 for subnet_netuid in bagbot_settings.SUBNET_SETTINGS:
                     await self.do_available_trades(subnet_netuid)
 
                 logging.info(f'Finished tick {self.tick} in {time.time() - start:.2f} seconds')
                 #return
                 try:
-                    await self.sub.wait_for_block()
+                    logger.info(f'Tick {self.tick}: Waiting for next block')
+                    await asyncio.wait_for(self.sub.wait_for_block(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f'Tick {self.tick}: wait_for_block timed out after 30s, reconnecting...')
+                    await self.sub.close()
+                    self.sub = await my_async_subtensor("finney")
                 except (OSError, KeyError):
                     await asyncio.sleep(12) #if error with waiting for block, just wait approx 1 block and try again
 
@@ -228,10 +364,19 @@ class BittensorUtility():
                 logger.info(f'connection reset, retrying...')
                 await asyncio.sleep(3)
             except websockets.exceptions.InvalidStatus:
+                logger.info(f'potential server error, reconnecting...')
+                try:
+                    await self.sub.close()
+                except:
+                    pass
                 self.sub = await my_async_subtensor("finney")
-                logger.info(f'potential server error, retrying...')
             except asyncio.exceptions.TimeoutError:
-                logger.info(f'timeout error... retrying...')
+                logger.warning(f'Timeout error in tick {self.tick}, reconnecting subtensor...')
+                try:
+                    await self.sub.close()
+                except:
+                    pass
+                self.sub = await my_async_subtensor("finney")
                 await asyncio.sleep(3)
             finally:
                 try:
@@ -247,10 +392,20 @@ class BittensorUtility():
         if 'buy_lower' not in subnet_settings or alpha_amount == 0:
             return buy_upper
         buy_lower = subnet_settings['buy_lower']
-        buy_at = buy_upper
-        price_reduction_per_alpha = (buy_upper - buy_lower) / subnet_settings['max_alpha']
-        for i in range(int(alpha_amount)):
-            buy_at -= price_reduction_per_alpha
+        max_alpha = subnet_settings['max_alpha']
+
+        # Get power curve setting (default to global setting)
+        buy_zone_power = subnet_settings.get('buy_zone_power', bagbot_settings.BUY_ZONE_POWER)
+
+        # Calculate position in the range (0 to 1)
+        progress = min(alpha_amount / max_alpha, 1.0)
+
+        # Apply power curve
+        curve_value = progress ** buy_zone_power
+
+        # Interpolate between buy_upper and buy_lower using the curve
+        buy_at = buy_upper - (buy_upper - buy_lower) * curve_value
+
         return buy_at
 
     def determine_sell_at_for_amount(self, subnet_settings, alpha_amount):
@@ -260,10 +415,20 @@ class BittensorUtility():
         if 'sell_upper' not in subnet_settings or alpha_amount == 0:
             return sell_lower
         sell_upper = subnet_settings['sell_upper']
-        sell_at = sell_upper
-        sell_price_reduction_per_alpha = (sell_upper - sell_lower) / subnet_settings['max_alpha']
-        for i in range(int(alpha_amount)):
-            sell_at -= sell_price_reduction_per_alpha
+        max_alpha = subnet_settings['max_alpha']
+
+        # Get power curve setting (default to global setting)
+        sell_zone_power = subnet_settings.get('sell_zone_power', bagbot_settings.SELL_ZONE_POWER)
+
+        # Calculate position in the range (0 to 1)
+        progress = min(alpha_amount / max_alpha, 1.0)
+
+        # Apply power curve
+        curve_value = progress ** sell_zone_power
+
+        # Interpolate between sell_upper and sell_lower using the curve
+        sell_at = sell_upper - (sell_upper - sell_lower) * curve_value
+
         return max(sell_lower, sell_at)
 
 
@@ -294,11 +459,19 @@ class BittensorUtility():
 
 
     def determineHotKey(self, unstake_amt, subnet_netuid):
-        for hotkey in self.current_stake_info:
-            stake_obj = self.current_stake_info[hotkey].get(subnet_netuid)
+        # Prioritize the configured validator for this subnet
+        configured_validator = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
+
+        # First check if configured validator has stake
+        if configured_validator in self.current_stake_info:
+            stake_obj = self.current_stake_info[configured_validator].get(subnet_netuid)
             stake = (float(stake_obj.stake) if stake_obj is not None else 0.0)
             if stake > 0:
-                return hotkey
+                return configured_validator
+
+        # If configured validator has no stake, don't sell from other validators
+        # (This prevents accidentally selling stake from validators the user doesn't want to trade on)
+        logger.warning(f'Configured validator {configured_validator} has no stake for subnet {subnet_netuid}, cannot sell')
         return None
 
 
@@ -307,8 +480,8 @@ class BittensorUtility():
         return slippage
 
 
-    def determineTokenBuyAmount(self, max_token_per_buy, token_in_pool):
-        max_amount_with_max_slippage = (token_in_pool*(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY/100.0)) / (1 - (bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY/100.0))
+    def determineTokenBuyAmount(self, max_token_per_buy, token_in_pool, max_slippage_percent):
+        max_amount_with_max_slippage = (token_in_pool*(max_slippage_percent/100.0)) / (1 - (max_slippage_percent/100.0))
         return min(max_token_per_buy, max_amount_with_max_slippage)
 
 
@@ -317,24 +490,28 @@ class BittensorUtility():
         current_stake_amt = self.my_current_stake(subnet_netuid)
         buy_threshold = self.get_subnet_buy_threshold(subnet_netuid)
 
-        goal_amount_to_buy = self.subnet_grids[subnet_netuid].get('buy_tao_amount_override', bagbot_settings.MAX_TAO_PER_BUY)
-        if self.balance > goal_amount_to_buy:
+        # Get subnet-specific settings or fall back to global defaults
+        max_tao_per_buy = self.get_subnet_setting(subnet_netuid, 'max_tao_per_buy', bagbot_settings.MAX_TAO_PER_BUY)
+        max_slippage = self.get_subnet_setting(subnet_netuid, 'max_slippage_percent_per_buy', bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)
+        hotkey = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
+
+        if self.balance > max_tao_per_buy:
 
             if subnet_netuid in self.stats and self.stats[subnet_netuid]['price'] < buy_threshold and current_stake_amt < self.subnet_grids[subnet_netuid]['max_alpha']:
                 logger.info(f'''Want to buy sn{subnet_netuid} at price {self.stats[subnet_netuid]['price']} because it's lower than my threshold: {buy_threshold}, currently have {current_stake_amt} alpha in it''')
 
-                tao_amount = self.determineTokenBuyAmount(goal_amount_to_buy, self.stats[subnet_netuid]['tao_in'])
+                tao_amount = self.determineTokenBuyAmount(max_tao_per_buy, self.stats[subnet_netuid]['tao_in'], max_slippage)
                 slippage = self.determineSlippage(tao_amount, self.stats[subnet_netuid]['tao_in'])
-                if Decimal(slippage) > Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY):
-                    raise Exception(f'Stopping before purchasing too much slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)}.  \nTO FIX: increase the MAX_TAO_PER_BUY variable or increase MAX_SLIPPAGE_PERCENT_PER_BUY')
+                if Decimal(slippage) > Decimal(max_slippage):
+                    raise Exception(f'Stopping before purchasing too much slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(max_slippage)}.  \nTO FIX: increase the max_tao_per_buy variable or increase max_slippage_percent_per_buy')
                 tao_amount = bt.utils.balance.tao(tao_amount)
                 trade = {
-                    'hotkey':bagbot_settings.STAKE_ON_VALIDATOR,
+                    'hotkey':hotkey,
                     'netuid':subnet_netuid,
                     'tao_amount':tao_amount,
                     'buy_threshold':buy_threshold,
                     'calculated_slippage':slippage,
-                    'max_slippage':bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY / 100.0
+                    'max_slippage':max_slippage / 100.0
                 }
                 logger.info(f"About to stake {tao_amount} to {subnet_netuid} with expected slippage of {slippage:.4f}%")
                 return trade
@@ -346,25 +523,29 @@ class BittensorUtility():
         current_stake_amt = self.my_current_stake(subnet_netuid)
         sell_threshold = self.get_subnet_sell_threshold(subnet_netuid)
 
+        # Get subnet-specific settings or fall back to global defaults
+        max_tao_per_sell = self.get_subnet_setting(subnet_netuid, 'max_tao_per_sell', bagbot_settings.MAX_TAO_PER_SELL)
+        max_slippage = self.get_subnet_setting(subnet_netuid, 'max_slippage_percent_per_buy', bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)
+
         if subnet_netuid in self.stats and \
             self.stats[subnet_netuid]['price'] > sell_threshold and \
             self.my_current_stake(subnet_netuid) > 0:
 
-            unstake_target = bagbot_settings.MAX_TAO_PER_SELL / self.stats[subnet_netuid]['price']
+            unstake_target = max_tao_per_sell / self.stats[subnet_netuid]['price']
             my_current_alpha = float(self.my_current_stake(subnet_netuid))
             max_alpha_possible_to_sell = min(my_current_alpha, unstake_target)
-            alpha_to_sell = self.determineTokenBuyAmount(max_alpha_possible_to_sell, self.stats[subnet_netuid]['alpha_in'])
+            alpha_to_sell = self.determineTokenBuyAmount(max_alpha_possible_to_sell, self.stats[subnet_netuid]['alpha_in'], max_slippage)
             alpha_amount = bt.utils.balance.tao(alpha_to_sell, subnet_netuid)
 
             hotkey = self.determineHotKey(alpha_to_sell, subnet_netuid)
             approx_tao = float(Decimal(self.stats[subnet_netuid]['price']) * Decimal(alpha_to_sell))
 
-            if approx_tao > bagbot_settings.MAX_TAO_PER_SELL:
-                raise Exception(f'Stopping before selling too much. approx_tao: {approx_tao}, max tao per sell: {bagbot_settings.MAX_TAO_PER_SELL}, price x alpha: {self.stats[subnet_netuid]["price"]} x {alpha_to_sell} \nTO FIX: increase the MAX_TAO_PER_SELL variable or increase MAX_SLIPPAGE_PERCENT_PER_BUY')
+            if approx_tao > max_tao_per_sell:
+                raise Exception(f'Stopping before selling too much. approx_tao: {approx_tao}, max tao per sell: {max_tao_per_sell}, price x alpha: {self.stats[subnet_netuid]["price"]} x {alpha_to_sell} \nTO FIX: increase the max_tao_per_sell variable or increase max_slippage_percent_per_buy')
 
             slippage = self.determineSlippage(alpha_to_sell, self.stats[subnet_netuid]['alpha_in'])
-            if Decimal(slippage) > Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY):
-                raise Exception(f'Stopping before selling too much, slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)}  \nTO FIX: increase the MAX_TAO_PER_SELL variable or increase MAX_SLIPPAGE_PERCENT_PER_BUY')
+            if Decimal(slippage) > Decimal(max_slippage):
+                raise Exception(f'Stopping before selling too much, slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(max_slippage)}  \nTO FIX: increase the max_tao_per_sell variable or increase max_slippage_percent_per_buy')
 
             logger.info(f"About to unstake {alpha_to_sell} alpha (~{approx_tao} TAO) in sn{subnet_netuid} on hotkey {hotkey} with expected slippage of {slippage:.4f}%")
 
@@ -372,7 +553,7 @@ class BittensorUtility():
                 'hotkey':hotkey,
                 'netuid':subnet_netuid,
                 'alpha_amount':alpha_amount,
-                'max_slippage':bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY / 100.0,
+                'max_slippage':max_slippage / 100.0,
                 'sell_threshold':sell_threshold,
                 'calculated_slippage':slippage,
                 'approx_tao': approx_tao,
@@ -387,22 +568,28 @@ class BittensorUtility():
         buyTrade = self.constructBuy(subnet_netuid)
         if buyTrade:
             try:
-                stake_result = await self.sub.add_stake(
-                    wallet=self.wallet,
-                    hotkey_ss58=buyTrade['hotkey'],
-                    netuid=buyTrade['netuid'],
-                    amount=buyTrade['tao_amount'],
-                    rate_tolerance=buyTrade['max_slippage'],
-                    wait_for_inclusion=False,
-                    wait_for_finalization=False,
-                    safe_staking=True,
-                    allow_partial_stake=False
+                logger.info(f"Attempting to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']}")
+                stake_result = await asyncio.wait_for(
+                    self.sub.add_stake(
+                        wallet=self.wallet,
+                        hotkey_ss58=buyTrade['hotkey'],
+                        netuid=buyTrade['netuid'],
+                        amount=buyTrade['tao_amount'],
+                        rate_tolerance=buyTrade['max_slippage'],
+                        wait_for_inclusion=False,
+                        wait_for_finalization=False,
+                        safe_staking=True,
+                        allow_partial_stake=False
+                    ),
+                    timeout=45.0
                 )
                 print(f'after buy {str(buyTrade)}')
                 if stake_result is True:
                     logger.info(f"Staked {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
                 else:
                     logger.info(f"Failed to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout staking on subnet {buyTrade['netuid']} after 45s")
             except Exception as e:
                 print(f'ERROR staking')
                 logger.error(traceback.format_exc())
@@ -411,22 +598,28 @@ class BittensorUtility():
         sellTrade = self.constructSell(subnet_netuid)
         if sellTrade:
             try:
-                unstake_result = await self.sub.unstake(
-                    wallet=self.wallet,
-                    hotkey_ss58=sellTrade['hotkey'] ,
-                    netuid=sellTrade['netuid'],
-                    amount=sellTrade['alpha_amount'],
-                    rate_tolerance=sellTrade['max_slippage'],
-                    wait_for_inclusion=True,
-                    wait_for_finalization=False,
-                    safe_staking=True,
-                    allow_partial_stake=False
+                logger.info(f"Attempting to unstake {float(sellTrade['alpha_amount'])} alpha from subnet {sellTrade['netuid']}")
+                unstake_result = await asyncio.wait_for(
+                    self.sub.unstake(
+                        wallet=self.wallet,
+                        hotkey_ss58=sellTrade['hotkey'] ,
+                        netuid=sellTrade['netuid'],
+                        amount=sellTrade['alpha_amount'],
+                        rate_tolerance=sellTrade['max_slippage'],
+                        wait_for_inclusion=True,
+                        wait_for_finalization=False,
+                        safe_staking=True,
+                        allow_partial_stake=False
+                    ),
+                    timeout=60.0
                 )
                 print(f'after sell {str(sellTrade)}')
                 if unstake_result is True:
                     logger.info(f"Unstaked {float(sellTrade['alpha_amount'])} stake units from sn{sellTrade['netuid']} (approx. {sellTrade['approx_tao']:.4f} TAO value) at price: {self.stats[subnet_netuid]['price']}.  my threshold = {sellTrade['sell_threshold']}")
                 else:
                     logger.info(f"Failed to unstake {str(sellTrade)}  sn{subnet_netuid} ({str(unstake_result)})")
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout unstaking from subnet {subnet_netuid} after 60s")
             except asyncio.exceptions.CancelledError as e:
                 print(f'ERROR unstaking - cancelled error')
                 logger.error(traceback.format_exc())
