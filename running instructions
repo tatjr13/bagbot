@@ -1,0 +1,34 @@
+To start Bagbot inside a tmux session (so it keeps running after you close the terminal):
+
+```bash
+tmux new -s bagbot
+```
+
+Then inside the tmux window:
+
+```bash
+cd ~/Desktop/TravisBot/bagbot
+source ~/.bagbotvirtualenv/bin/activate
+python3 bagbot.py
+```
+
+You’ll see the usual startup screen; press **Y** to proceed.
+
+To leave it running but close your terminal:
+
+```
+Ctrl-b  then  d
+```
+
+To re-open the session later:
+
+```bash
+tmux attach -t bagbot
+```
+
+If you ever want to stop it entirely:
+
+```bash
+tmux kill-session -t bagbot
+```
+
