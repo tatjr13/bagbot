@@ -51,7 +51,7 @@ async def my_async_subtensor(*args, **kwargs):
     while attempts < 15:
         try:
             return await get_async_subtensor(*args, **kwargs)
-        except (websockets.exceptions.InvalidStatus, AttributeError) as e:
+        except (websockets.exceptions.InvalidStatus, AttributeError, asyncio.exceptions.TimeoutError) as e:
             logger.error(f'Invalid status err {str(e)}, retrying')
             attempts += 1
             if attempts >= 14:
