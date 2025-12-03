@@ -12,12 +12,16 @@ from bittensor.core.async_subtensor import get_async_subtensor
 import async_substrate_interface
 
 import printHelpers
-import bagbot_settings
 from decimal import Decimal, getcontext
 getcontext().prec = 16 #Precision for price stuff
 
 from rich.console import Console
 console = Console()
+
+import ast
+from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 class InvalidSettings(Exception): pass
 
@@ -32,6 +36,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def load_safe_python_settings():
+    settings = {}
+
+    # Determine where to look for the files (works in dev and when frozen with PyInstaller/Nuitka)
+    exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(".")
+
+    default_path = exe_dir / "bagbot_settings.py"
+    overrides_path = exe_dir / "bagbot_settings_overrides.py"
+
+    for path in [default_path, overrides_path]:
+        is_default = (path == default_path)
+
+        if not path.exists():
+            if is_default:
+                raise FileNotFoundError(f"CRITICAL: {path} is missing! Cannot continue.")
+            else:
+                print(f"Info: Optional overrides file not found (this is fine): {path}")
+                continue  # overrides are optional
+
+        source = path.read_text(encoding="utf-8")
+
+        try:
+            tree = ast.parse(source)  # mode='exec' by default → accepts real Python files
+        except SyntaxError as e:
+            raise SyntaxError(f"Invalid Python syntax in {path.name}: {e}") from e
+
+        for node in tree.body:
+            # Simple assignment: VAR = value
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name) and target.id.isidentifier():
+                    name = target.id
+                    try:
+                        value = ast.literal_eval(node.value)
+                        settings[name] = value
+                    except (ValueError, SyntaxError):
+                        print(f"Warning: Skipping unsafe or invalid value for '{name}' in {path.name}")
+
+            # Allow top-level comments / docstrings / pass etc. → just ignore them
+            # (optional) you can also support AnnAssign (typed vars) if you want:
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                name = node.target.id
+                if node.value:  # only if there's actually a value
+                    try:
+                        value = ast.literal_eval(node.value)
+                        settings[name] = value
+                    except (ValueError, SyntaxError):
+                        print(f"Warning: Skipping unsafe annotated assignment '{name}' in {path.name}")
+
+    return SimpleNamespace(**settings)
+
+bagbot_settings = load_safe_python_settings()
 
 def parseArgs():
     parser = argparse.ArgumentParser(description="A basic bittensor alpha bot")
@@ -48,13 +104,13 @@ rao_to_tao = lambda rao : int(rao)/1000000000.0
 
 async def my_async_subtensor(*args, **kwargs):
     attempts = 0
-    while attempts < 15:
+    while attempts < 20:
         try:
             return await get_async_subtensor(*args, **kwargs)
         except (websockets.exceptions.InvalidStatus, AttributeError, asyncio.exceptions.TimeoutError) as e:
             logger.error(f'Invalid status err {str(e)}, retrying')
             attempts += 1
-            if attempts >= 14:
+            if attempts >= 19:
                 raise
             await asyncio.sleep(attempts*2)
 
@@ -65,6 +121,7 @@ class BittensorUtility():
         self.args = args
         self.current_stake_info = {}
         self.tick = 0
+        self.gridLoaded = False
 
 
     def get_subnet_setting(self, subnet_netuid, setting_name, default_value):
@@ -190,15 +247,27 @@ class BittensorUtility():
 
 
     async def refresh_subnet_grid(self):
-        self.subnet_grids = bagbot_settings.SUBNET_SETTINGS
-        self.validateGrid()
+        if not self.gridLoaded:
+            self.subnet_grids = bagbot_settings.SUBNET_SETTINGS
+            self.validateGrid()
+        self.gridLoaded = True
 
     def validateGrid(self):
         for subnet_id in self.subnet_grids:
+            if (self.subnet_grids[subnet_id].get('sell_lower') or self.subnet_grids[subnet_id].get('sell_upper')) and self.subnet_grids[subnet_id].get('sell'):
+                raise InvalidSettings(f'Do not mix and match [sell_lower + sell_upper] with [sell], pick one or the other.  Subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS: {self.subnet_grids[subnet_id]}')
+            if (self.subnet_grids[subnet_id].get('buy_lower') or self.subnet_grids[subnet_id].get('buy_upper')) and self.subnet_grids[subnet_id].get('buy'):
+                raise InvalidSettings(f'Do not mix and match [buy_lower + buy_upper] with [buy], pick one or the other.  Subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
             if not self.subnet_grids[subnet_id].get('sell_lower'):
-                raise InvalidSettings(f'"sell_lower" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
+                if self.subnet_grids[subnet_id].get('sell'):
+                    self.subnet_grids[subnet_id]['sell_lower'] = self.subnet_grids[subnet_id]['sell']
+                else:
+                    raise InvalidSettings(f'"sell_lower" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
             if not self.subnet_grids[subnet_id].get('buy_upper'):
-                raise InvalidSettings(f'"buy_upper" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
+                if self.subnet_grids[subnet_id].get('buy') is not None:
+                    self.subnet_grids[subnet_id]['buy_upper'] = self.subnet_grids[subnet_id]['buy']
+                else:
+                    raise InvalidSettings(f'"buy_upper" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
             if not self.subnet_grids[subnet_id].get('max_alpha'):
                 raise InvalidSettings(f'"max_alpha" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
             if self.subnet_grids[subnet_id]['buy_upper'] > self.subnet_grids[subnet_id]['sell_lower']:
@@ -265,7 +334,26 @@ class BittensorUtility():
 
 
 
+    async def get_stake_for_hotkey(self, hotkey):
+        attempts = 10
+        for i in range(attempts):
+            try:
+                retval = await asyncio.wait_for(
+                            self.sub.get_stake_for_coldkey_and_hotkey(
+                                hotkey_ss58=hotkey,
+                                coldkey_ss58=self.wallet.coldkey.ss58_address
+                            ),
+                            timeout=20.0
+                        )
+                return retval
+            except asyncio.exceptions.TimeoutError:
+                logger.info('Timeout fetching hotkey stake')
+                await asyncio.sleep(10)
+        raise Exception("Too many attempts to refresh stats")
+
+
     async def refresh_stats(self, hotkeys):
+
         try:
             logger.info('Fetching subnet stats')
             self.stats = await asyncio.wait_for(self.get_subnet_stats(), timeout=30.0)
@@ -278,13 +366,7 @@ class BittensorUtility():
 
         for hotkey in hotkeys:
             logger.info(f'Fetching stake info for {hotkey}')
-            self.current_stake_info[hotkey] = await asyncio.wait_for(
-                self.sub.get_stake_for_coldkey_and_hotkey(
-                    hotkey_ss58=hotkey,
-                    coldkey_ss58=self.wallet.coldkey.ss58_address
-                ),
-                timeout=20.0
-            )
+            self.current_stake_info[hotkey] = await self.get_stake_for_hotkey(hotkey)
 
         logger.info('Fetching wallet balance')
         self.balance = float(await asyncio.wait_for(
@@ -303,7 +385,6 @@ class BittensorUtility():
 
         logger.info('{' + f'wallet_value:"{sumStakedValue:.2f} + {self.balance:.2f}", ' + ', '.join(tickLog) + '}')
 
-        await self.refresh_subnet_grid()
 
 
     async def run(self):
@@ -363,8 +444,8 @@ class BittensorUtility():
             except ConnectionResetError:
                 logger.info(f'connection reset, retrying...')
                 await asyncio.sleep(3)
-            except websockets.exceptions.InvalidStatus:
-                logger.info(f'potential server error, reconnecting...')
+            except (websockets.exceptions.InvalidStatus, async_substrate_interface.errors.SubstrateRequestException, websockets.exceptions.ConnectionClosedError) as e:
+                logger.info(f'potential server error: {e}, reconnecting...')
                 try:
                     await self.sub.close()
                 except:
@@ -628,6 +709,7 @@ class BittensorUtility():
                 print(f'ERROR unstaking')
                 logger.error(traceback.format_exc())
                 logger.error(f"Failed to unstake from subnet {subnet_netuid}: {e}")
+                raise
 
 
 if __name__ == "__main__":

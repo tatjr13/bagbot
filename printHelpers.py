@@ -170,7 +170,7 @@ def print_table_rich(
         max_stake_str = f"{max_stake_amt:.0f}" if max_stake_amt > 0 else ''
         stake_perc_filled = str(int(stake_amt*100.0/max_stake_amt)) + '%' if max_stake_amt > 0 else ''
         table.add_row(
-            str(netuid),
+            f"{'BUY ' if probably_buying else ''}{'SELL ' if probably_selling else ''}{str(netuid)}",
             name,
             f"{stake_amount_str}",
             f"{max_stake_str}",
