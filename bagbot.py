@@ -222,7 +222,7 @@ class BittensorUtility():
     async def setupWallet(self):
         wallet_pw = bagbot_settings.WALLET_PW
 
-        self.wallet = bt.wallet(name=bagbot_settings.WALLET_NAME)
+        self.wallet = bt.Wallet(name=bagbot_settings.WALLET_NAME)
         self.wallet.create_if_non_existent()
         self.wallet.coldkey_file.save_password_to_env(wallet_pw)
         self.wallet.unlock_coldkey()
