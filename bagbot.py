@@ -703,11 +703,15 @@ class BittensorUtility():
                 else:
                     logger.info(f"Failed to unstake {str(sellTrade)}  sn{subnet_netuid} ({str(unstake_result)})")
             except asyncio.TimeoutError:
-                logger.error(f"Timeout unstaking from subnet {subnet_netuid} after 60s")
+                msg = f"Timeout unstaking from subnet {subnet_netuid} after 60s"
+                print(msg)
+                logger.error(msg)
+                self.sub = await my_async_subtensor("finney")
             except (asyncio.exceptions.CancelledError, asyncio.exceptions.InvalidStateError) as e:
                 print(f'ERROR unstaking - {e}... continuing')
                 logger.error(traceback.format_exc())
                 logger.error(f"Failed to unstake from subnet {subnet_netuid}: {e}")
+                self.sub = await my_async_subtensor("finney")
             except Exception as e:
                 print(f'ERROR unstaking')
                 logger.error(traceback.format_exc())
