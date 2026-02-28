@@ -13,7 +13,7 @@ import async_substrate_interface
 
 import printHelpers
 from decimal import Decimal, getcontext
-getcontext().prec = 16 #Precision for price stuff
+getcontext().prec = 14 #Precision for price stuff
 
 from rich.console import Console
 console = Console()
