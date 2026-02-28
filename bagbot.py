@@ -264,7 +264,7 @@ class BittensorUtility():
                     self.subnet_grids[subnet_id]['sell_lower'] = self.subnet_grids[subnet_id]['sell']
                 else:
                     raise InvalidSettings(f'"sell_lower" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
-            if not self.subnet_grids[subnet_id].get('buy_upper'):
+            if self.subnet_grids[subnet_id].get('buy_upper') is None:
                 if self.subnet_grids[subnet_id].get('buy') is not None:
                     self.subnet_grids[subnet_id]['buy_upper'] = self.subnet_grids[subnet_id]['buy']
                 else:
