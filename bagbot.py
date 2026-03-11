@@ -37,6 +37,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def print_link(url: str, text: str | None = None) -> None:
+    if text is None:
+        text = url
+    # \x1b = ESC
+    print(f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+
 def load_safe_python_settings():
     settings = {}
 
@@ -425,6 +431,7 @@ class BittensorUtility():
                         print('Exiting...')
                         return
 
+                print_link(f"https://taoflute.com/d/5c216965-b99b-4d82-8b31-931bb3d71567/subnets-overview?orgId=1&var-target_subnets={allSubnetParams}", 'Taoflute Portfolio link')
                 logger.info(f'Tick {self.tick}: Checking trades')
                 for subnet_netuid in bagbot_settings.SUBNET_SETTINGS:
                     await self.do_available_trades(subnet_netuid)
