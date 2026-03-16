@@ -76,7 +76,7 @@ Follow these steps to set up and run Bagbot:
 
 8. **Edit the Settings File**  
    In `bagbot_settings_overrides.py`:
-   - Update the `WALLET_PW` variable with your wallet's password.
+   - Either update `WALLET_PW` with your wallet password, or point `WALLET_PW_FILE` at a local file containing only the password.
    - Modify other settings as desired. The file includes notes explaining each variable.
 
 ## Running the Bot

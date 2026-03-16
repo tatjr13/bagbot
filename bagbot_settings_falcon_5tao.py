@@ -1,11 +1,15 @@
 STAKE_ON_VALIDATOR = "5FtBncJvGhxjBs4aFn2pid6aur9tBUuo9QR7sHe5DkoRizzo"
 
 # Set this to the password you choose when restoring the Falcon coldkey.
+# Prefer WALLET_PW_FILE on the live box so the password is not stored directly in this file.
 WALLET_PW = "CHANGE_ME"
+WALLET_PW_ENV = None
+WALLET_PW_FILE = None
 WALLET_NAME = "Falcon"
 MAX_PORTFOLIO_TAO = None
 MIN_TAO_RESERVE = 0.0
 EXECUTION_FEE_BUFFER_TAO = 0.001
+MAX_SUBNET_ALLOCATION_RATIO = 0.35
 ENABLE_POSITION_ROTATION = True
 ENABLE_ATOMIC_ROTATION = True
 ENABLE_MEV_PROTECTION = True

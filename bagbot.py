@@ -2,6 +2,7 @@ import asyncio
 import logging
 import argparse
 import time
+import os
 import websockets
 import traceback
 import json
@@ -107,6 +108,31 @@ def _settings_signature():
             signature.append((filename, None))
     return tuple(signature)
 
+
+def resolve_wallet_password(settings):
+    """Resolve the wallet password from env/file settings before unlocking keys."""
+    env_name = getattr(settings, 'WALLET_PW_ENV', None)
+    if env_name:
+        env_value = os.environ.get(env_name, '').strip()
+        if not env_value:
+            raise InvalidSettings(f'Environment variable {env_name} is required but not set')
+        return env_value
+
+    pw_file = getattr(settings, 'WALLET_PW_FILE', None)
+    if pw_file:
+        try:
+            file_value = Path(pw_file).read_text(encoding='utf-8').strip()
+        except FileNotFoundError as exc:
+            raise InvalidSettings(f'Wallet password file is missing: {pw_file}') from exc
+        if not file_value:
+            raise InvalidSettings(f'Wallet password file is empty: {pw_file}')
+        return file_value
+
+    wallet_pw = getattr(settings, 'WALLET_PW', None)
+    if wallet_pw is None or str(wallet_pw).strip() == '':
+        raise InvalidSettings('WALLET_PW is missing; set WALLET_PW, WALLET_PW_ENV, or WALLET_PW_FILE')
+    return wallet_pw
+
 bagbot_settings = load_safe_python_settings()
 
 # Brains strategy engine (optional, enabled via BRAINS_ENABLED in settings)
@@ -154,7 +180,9 @@ class BittensorUtility():
         self.tick = 0
         self.gridLoaded = False
         self.settings_signature = None
+        self.static_subnet_grids = {}
         self.subnet_grids = {}
+        self.execution_blocked_subnets = {}
 
 
     def get_subnet_setting(self, subnet_netuid, setting_name, default_value):
@@ -243,9 +271,10 @@ class BittensorUtility():
             List of unique validator hotkeys to query for stake info
         """
         validators = {bagbot_settings.STAKE_ON_VALIDATOR}
+        grid_source = self.static_subnet_grids or self.subnet_grids
 
         # Check each subnet for validator overrides
-        for subnet_config in self.subnet_grids.values():
+        for subnet_config in grid_source.values():
             if 'stake_on_validator' in subnet_config:
                 validators.add(subnet_config['stake_on_validator'])
 
@@ -253,7 +282,7 @@ class BittensorUtility():
 
 
     async def setupWallet(self):
-        wallet_pw = bagbot_settings.WALLET_PW
+        wallet_pw = resolve_wallet_password(bagbot_settings)
 
         self.wallet = bt.Wallet(name=bagbot_settings.WALLET_NAME)
         self.wallet.create_if_non_existent()
@@ -288,10 +317,11 @@ class BittensorUtility():
 
         bagbot_settings = load_safe_python_settings()
         self.settings_signature = current_signature
-        self.subnet_grids = {
+        self.static_subnet_grids = {
             netuid: dict(config)
             for netuid, config in getattr(bagbot_settings, 'SUBNET_SETTINGS', {}).items()
         }
+        self.subnet_grids = dict(self.static_subnet_grids)
         self.validateGrid()
         self.gridLoaded = True
 
@@ -301,7 +331,7 @@ class BittensorUtility():
             except Exception as e:
                 logger.error(f'Brains settings refresh error: {e}')
 
-        logger.info(f'Loaded subnet settings for netuids: {sorted(self.subnet_grids.keys())}')
+        logger.info(f'Loaded subnet settings for netuids: {sorted(self.static_subnet_grids.keys())}')
 
     def validateGrid(self):
         for subnet_id in self.subnet_grids:
@@ -451,6 +481,7 @@ class BittensorUtility():
             start = time.time()
             try:
                 logger.info(f'Starting tick {self.tick}')
+                await self.refresh_subnet_grid()
                 # Try to discover ALL validators with stake from blockchain
                 discovered_validators = await self.discover_all_validators_with_stake()
 
@@ -469,11 +500,15 @@ class BittensorUtility():
                 if _strategy_engine is not None:
                     try:
                         _strategy_engine.on_tick(
-                            self.stats, self.subnet_grids,
+                            self.stats, self.static_subnet_grids,
                             self.current_stake_info, self.balance
                         )
+                        self.subnet_grids = _strategy_engine.get_runtime_subnet_grids(self.static_subnet_grids)
                     except Exception as e:
                         logger.error(f'Brains on_tick error: {e}')
+                        self.subnet_grids = dict(self.static_subnet_grids)
+                else:
+                    self.subnet_grids = dict(self.static_subnet_grids)
 
                 logger.info(f'Tick {self.tick}: Printing table')
                 printHelpers.print_table_rich(self, console, self.current_stake_info, list(self.subnet_grids.keys()), self.stats, self.balance, self.subnet_grids)
@@ -624,6 +659,12 @@ class BittensorUtility():
         return total_value
 
 
+    def my_subnet_staked_value(self, subnet_netuid):
+        if subnet_netuid not in self.stats:
+            return 0.0
+        return self.my_current_stake(subnet_netuid) * self.stats[subnet_netuid]['price']
+
+
     def determineHotKey(self, unstake_amt, subnet_netuid):
         # Prioritize the configured validator for this subnet
         configured_validator = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
@@ -685,6 +726,20 @@ class BittensorUtility():
         return max(0.0, float(self.balance) - tao_reserve - execution_fee_buffer)
 
 
+    def _max_additional_subnet_allocation(self, subnet_netuid):
+        allocation_ratio = getattr(bagbot_settings, 'MAX_SUBNET_ALLOCATION_RATIO', None)
+        if allocation_ratio is None:
+            return None
+
+        total_portfolio_value = self.my_total_staked_value() + float(self.balance)
+        if total_portfolio_value <= 0:
+            return None
+
+        max_subnet_value = total_portfolio_value * float(allocation_ratio)
+        current_subnet_value = self.my_subnet_staked_value(subnet_netuid)
+        return max(0.0, max_subnet_value - current_subnet_value)
+
+
     def _rotation_constraints_active(self):
         remaining_budget = self._available_remaining_budget()
         spendable_balance = self._available_spendable_balance()
@@ -696,6 +751,33 @@ class BittensorUtility():
 
     def _mev_enabled(self):
         return bool(getattr(bagbot_settings, 'ENABLE_MEV_PROTECTION', False))
+
+
+    def _block_subnet_execution(self, subnet_netuid, reason, ttl_seconds=3600):
+        self.execution_blocked_subnets[subnet_netuid] = {
+            'reason': reason,
+            'blocked_until': time.time() + ttl_seconds,
+        }
+        logger.warning(f'Blocking sn{subnet_netuid} from new allocations for {ttl_seconds}s: {reason}')
+
+
+    def _subnet_execution_block_reason(self, subnet_netuid):
+        now = time.time()
+        blocked = self.execution_blocked_subnets.get(subnet_netuid)
+        if not blocked:
+            return None
+        if now >= blocked['blocked_until']:
+            self.execution_blocked_subnets.pop(subnet_netuid, None)
+            return None
+        return blocked['reason']
+
+
+    def _extract_execution_block_reason(self, result_text):
+        if 'ZeroMaxStakeAmount' in result_text:
+            return 'ZeroMaxStakeAmount'
+        if 'HotKeyNotRegisteredInSubNet' in result_text:
+            return 'HotKeyNotRegisteredInSubNet'
+        return None
 
 
     def _rotation_extrinsic_fee_buffer_tao(self):
@@ -811,6 +893,19 @@ class BittensorUtility():
                     logger.info(f'Not enough balance to stake: {self.balance:.2f}')
                 return None
 
+        allocation_headroom = self._max_additional_subnet_allocation(subnet_netuid)
+        if not ignore_balance_limits and allocation_headroom is not None:
+            max_tao_per_buy = min(max_tao_per_buy, allocation_headroom)
+            if max_tao_per_buy < 0.01:
+                if not preview_only:
+                    logger.info(
+                        f'Subnet allocation cap reached for sn{subnet_netuid}: '
+                        f'ratio={float(getattr(bagbot_settings, "MAX_SUBNET_ALLOCATION_RATIO", 0.0)):.2f}, '
+                        f'current_value={self.my_subnet_staked_value(subnet_netuid):.4f}, '
+                        f'portfolio_value={(self.my_total_staked_value() + float(self.balance)):.4f}'
+                    )
+                return None
+
         if subnet_netuid in self.stats and self.stats[subnet_netuid]['price'] < buy_threshold and current_stake_amt < self.subnet_grids[subnet_netuid]['max_alpha']:
             if not preview_only:
                 logger.info(f'''Want to buy sn{subnet_netuid} at price {self.stats[subnet_netuid]['price']} because it's lower than my threshold: {buy_threshold}, currently have {current_stake_amt} alpha in it''')
@@ -887,6 +982,8 @@ class BittensorUtility():
 
         best_trade = None
         for target_netuid in self.subnet_grids:
+            if self._subnet_execution_block_reason(target_netuid):
+                continue
             buy_trade = self.constructBuy(target_netuid, ignore_balance_limits=True, preview_only=True)
             if buy_trade is None:
                 continue
@@ -1003,6 +1100,9 @@ class BittensorUtility():
                     except Exception as e:
                         logger.error(f'Brains on_fill error (buy): {e}')
             else:
+                block_reason = self._extract_execution_block_reason(str(stake_result))
+                if block_reason:
+                    self._block_subnet_execution(buyTrade['netuid'], block_reason)
                 logger.info(f"Failed to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
         except asyncio.TimeoutError:
             logger.error(f"Timeout staking on subnet {buyTrade['netuid']} after 45s")
@@ -1112,6 +1212,9 @@ class BittensorUtility():
                     except Exception as e:
                         logger.error(f'Brains on_fill error (rotation): {e}')
                 return True
+            block_reason = self._extract_execution_block_reason(str(swap_result))
+            if block_reason:
+                self._block_subnet_execution(rotationTrade['destination_netuid'], block_reason)
             logger.info(f"Failed rotation swap {rotationTrade} ({str(swap_result)})")
             return False
         except asyncio.TimeoutError:
@@ -1134,8 +1237,9 @@ class BittensorUtility():
 
 
     async def do_available_trades(self, subnet_netuid):
-
-        buyTrade = self.constructBuy(subnet_netuid)
+        buyTrade = None
+        if not self._subnet_execution_block_reason(subnet_netuid):
+            buyTrade = self.constructBuy(subnet_netuid)
         if buyTrade:
             await self.execute_buy_trade(buyTrade)
 

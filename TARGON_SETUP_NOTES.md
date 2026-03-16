@@ -33,6 +33,8 @@ This file captures the current live Bagbot/Arbos operating model and the Targon 
 - Rotation is enabled and can happen even when cash is still available
 - Atomic subnet-to-subnet rotation is enabled
 - MEV-protected execution is enabled
+- Live subnet discovery is dynamic: Brains scans the observed universe, keeps a bounded active roster, and continues managing held positions outside the current buy roster until they are exited
+- A per-subnet allocation cap can be used to stop the bot from aping the entire bankroll into a single subnet; the Falcon canary template currently uses `MAX_SUBNET_ALLOCATION_RATIO = 0.35`
 - A small execution fee buffer is intentionally kept so the bot does not fail on dust-level fee shortfalls
 - Current design goal is an active book of roughly `5-7` positions, with permission to rotate out of weak inventory into better setups
 - The bot must never transfer funds to another wallet
@@ -52,6 +54,8 @@ This file captures the current live Bagbot/Arbos operating model and the Targon 
   - `btcli wallet regen-coldkey --wallet-name Falcon --wallet-path /data/bittensor-wallets --use-password`
 - Create the hotkey with:
   - `btcli wallet new-hotkey --wallet-name Falcon --wallet-path /data/bittensor-wallets --hotkey default --n-words 24 --no-use-password`
+- Prefer `WALLET_PW_FILE` or `WALLET_PW_ENV` over a plaintext `WALLET_PW` in tracked config files
+- On the Targon box, keep password files at mode `600`
 - Do not commit live wallet passwords, mnemonics, or API keys into tracked files
 
 ## Targon Operations
@@ -85,5 +89,6 @@ tail -n 100 /data/bagbot/staking.log
 ## Safety Notes
 
 - Keep secrets in local `.env` files or remote-only runtime files, not in Git
+- Keep `/data/bagbot/bagbot_settings_overrides.py` and any password files at `600`
 - Treat Taostats as read-only research input
 - Do not add any workflow that transfers funds or uses a second wallet without explicit operator approval

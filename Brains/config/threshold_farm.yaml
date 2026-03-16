@@ -33,6 +33,11 @@ disable_buys_if_6h_pump_pct: 0.06
 max_live_subnets: 6
 new_subnet_min_age_days: 7
 min_liquidity_tao: 150
+dynamic_max_alpha_tao: 25.0
+dynamic_buy_upper_discount_pct: 0.015
+dynamic_buy_lower_discount_pct: 0.045
+dynamic_sell_lower_premium_pct: 0.020
+dynamic_sell_upper_premium_pct: 0.080
 
 # Lookback windows
 lookbacks:

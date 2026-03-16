@@ -1,6 +1,7 @@
 import unittest
 import bagbot
 import math
+import os
 from unittest.mock import patch
 
 
@@ -25,6 +26,9 @@ class TestBAGBot(unittest.TestCase):
         bagbot.bagbot_settings.MAX_PORTFOLIO_TAO = None
         bagbot.bagbot_settings.MIN_TAO_RESERVE = 0.0
         bagbot.bagbot_settings.EXECUTION_FEE_BUFFER_TAO = 0.0
+        bagbot.bagbot_settings.MAX_SUBNET_ALLOCATION_RATIO = None
+        bagbot.bagbot_settings.WALLET_PW_ENV = None
+        bagbot.bagbot_settings.WALLET_PW_FILE = None
         bagbot.bagbot_settings.STAKE_ON_VALIDATOR = 'somehotkey'
         bagbot.bagbot_settings.ENABLE_POSITION_ROTATION = False
         bagbot.bagbot_settings.ENABLE_ATOMIC_ROTATION = True
@@ -330,6 +334,45 @@ class TestBAGBot(unittest.TestCase):
         buyDict = bu.constructBuy(90)
         self.assertTrue(math.isclose(float(buyDict['tao_amount']), 1.0, rel_tol=1e-6))
 
+    def testBuyBlockedBySubnetAllocationCap(self):
+        args = {}
+        bagbot.bagbot_settings.MAX_TAO_PER_BUY = None
+        bagbot.bagbot_settings.MAX_SUBNET_ALLOCATION_RATIO = 0.60
+        bu = bagbot.BittensorUtility(args)
+        bu.stats = {90: {'price': 0.01, 'tao_in': 10000}}
+        bu.balance = 0.50
+        bu.current_stake_info = {'somehotkey': {90: MockStake(100)}}
+        bu.subnet_grids = {90: {'buy_upper': 0.02,
+                                'sell_lower': 0.03,
+                                'max_alpha': 3000,
+                           }}
+        buyDict = bu.constructBuy(90)
+        self.assertIsNone(buyDict)
+
+    def testBuySizedDownBySubnetAllocationCap(self):
+        args = {}
+        bagbot.bagbot_settings.MAX_TAO_PER_BUY = None
+        bagbot.bagbot_settings.MAX_SUBNET_ALLOCATION_RATIO = 0.75
+        bu = bagbot.BittensorUtility(args)
+        bu.stats = {90: {'price': 0.01, 'tao_in': 10000}}
+        bu.balance = 0.50
+        bu.current_stake_info = {'somehotkey': {90: MockStake(100)}}
+        bu.subnet_grids = {90: {'buy_upper': 0.02,
+                                'sell_lower': 0.03,
+                                'max_alpha': 3000,
+                           }}
+        buyDict = bu.constructBuy(90)
+        self.assertTrue(math.isclose(float(buyDict['tao_amount']), 0.125, rel_tol=1e-6))
+
+    def testResolveWalletPasswordFromEnv(self):
+        settings = bagbot.SimpleNamespace(
+            WALLET_PW='ignored',
+            WALLET_PW_ENV='BAGBOT_TEST_WALLET_PW',
+            WALLET_PW_FILE=None,
+        )
+        with patch.dict(os.environ, {'BAGBOT_TEST_WALLET_PW': 'secret-from-env'}, clear=False):
+            self.assertEqual(bagbot.resolve_wallet_password(settings), 'secret-from-env')
+
     def testPreviewBuyDoesNotCrashAtSlippageBoundary(self):
         args = {}
         bagbot.bagbot_settings.MAX_TAO_PER_BUY = None
@@ -442,6 +485,63 @@ class TestBAGBot(unittest.TestCase):
 
         rotationTrade = bagbot.asyncio.run(bu.constructRotationTrade())
         self.assertIsNone(rotationTrade)
+
+    def testRotationTradeSkipsBlockedTarget(self):
+        args = {}
+        bagbot.bagbot_settings.ENABLE_POSITION_ROTATION = True
+        bagbot.bagbot_settings.ENABLE_ATOMIC_ROTATION = True
+        bagbot.bagbot_settings.MAX_PORTFOLIO_TAO = None
+        bagbot.bagbot_settings.MAX_TAO_PER_BUY = 0.05
+        bagbot.bagbot_settings.MAX_TAO_PER_SELL = 1.0
+
+        bu = bagbot.BittensorUtility(args)
+        bu.balance = 1.0
+        bu.stats = {
+            90: {'price': 0.009, 'tao_in': 10000, 'alpha_in': 10000},
+            91: {'price': 0.010, 'tao_in': 10000, 'alpha_in': 10000},
+        }
+        bu.current_stake_info = {
+            bagbot.bagbot_settings.STAKE_ON_VALIDATOR: {
+                91: MockStake(100),
+            }
+        }
+        bu.subnet_grids = {
+            90: {
+                'buy_lower': 0.0105,
+                'buy_upper': 0.011,
+                'sell_lower': 0.013,
+                'sell_upper': 0.014,
+                'max_alpha': 1000,
+            },
+            91: {
+                'buy_lower': 0.008,
+                'buy_upper': 0.009,
+                'sell_lower': 0.012,
+                'sell_upper': 0.013,
+                'max_alpha': 1000,
+            },
+        }
+        bu.sub = StubSub(MockSimSwapResult(dest_netuid=90))
+        bu._block_subnet_execution(90, 'ZeroMaxStakeAmount', ttl_seconds=3600)
+
+        rotationTrade = bagbot.asyncio.run(bu.constructRotationTrade())
+        self.assertIsNone(rotationTrade)
+
+    def testDoAvailableTradesSkipsBlockedSubnet(self):
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        bu.balance = 1.0
+        bu.wallet = object()
+        bu.stats = {90: {'price': 0.01, 'tao_in': 10000}}
+        bu.subnet_grids = {90: {'buy_upper': 0.02,
+                                'sell_lower': 0.03,
+                                'max_alpha': 3000,
+                           }}
+        bu.sub = CaptureAddStakeSub()
+        bu._block_subnet_execution(90, 'ZeroMaxStakeAmount', ttl_seconds=3600)
+
+        bagbot.asyncio.run(bu.do_available_trades(90))
+        self.assertEqual(bu.sub.calls, [])
 
     def testRefreshSubnetGridHotReloadsUpdatedAllowlist(self):
         args = {}
