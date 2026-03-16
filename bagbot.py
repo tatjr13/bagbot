@@ -665,6 +665,11 @@ class BittensorUtility():
         return self.my_current_stake(subnet_netuid) * self.stats[subnet_netuid]['price']
 
 
+    def _stake_for_hotkey_subnet(self, hotkey, subnet_netuid):
+        stake_obj = self.current_stake_info.get(hotkey, {}).get(subnet_netuid)
+        return float(stake_obj.stake) if stake_obj is not None else 0.0
+
+
     def determineHotKey(self, unstake_amt, subnet_netuid):
         # Prioritize the configured validator for this subnet
         configured_validator = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
@@ -780,6 +785,14 @@ class BittensorUtility():
         return None
 
 
+    def _mev_rotation_outcome_failed(self, result_text):
+        lowered = result_text.lower()
+        return (
+            'failed to find outcome of the shield extrinsic' in lowered
+            or "protected extrinsic wasn't decrypted" in lowered
+        )
+
+
     def _rotation_extrinsic_fee_buffer_tao(self):
         return float(getattr(bagbot_settings, 'ROTATION_EXTRINSIC_FEE_BUFFER_TAO', 0.0002) or 0.0002)
 
@@ -803,8 +816,10 @@ class BittensorUtility():
 
         max_slippage = self.get_subnet_setting(subnet_netuid, 'max_slippage_percent_per_buy', bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)
         unstake_target = max_tao_per_sell / self.stats[subnet_netuid]['price']
-        my_current_alpha = float(self.my_current_stake(subnet_netuid))
-        max_alpha_possible_to_sell = min(my_current_alpha, unstake_target)
+        available_hotkey_alpha = self._stake_for_hotkey_subnet(hotkey, subnet_netuid)
+        if available_hotkey_alpha <= 0:
+            return None
+        max_alpha_possible_to_sell = min(available_hotkey_alpha, unstake_target)
         alpha_to_sell = self.determineTokenBuyAmount(max_alpha_possible_to_sell, self.stats[subnet_netuid]['alpha_in'], max_slippage)
         alpha_amount = bt.utils.balance.tao(alpha_to_sell, subnet_netuid)
         approx_tao = float(Decimal(self.stats[subnet_netuid]['price']) * Decimal(alpha_to_sell))
@@ -1167,12 +1182,8 @@ class BittensorUtility():
 
 
     async def execute_rotation_trade(self, rotationTrade):
-        try:
-            logger.info(
-                f"Attempting atomic swap from sn{rotationTrade['origin_netuid']} to sn{rotationTrade['destination_netuid']} "
-                f"for {float(rotationTrade['alpha_amount'])} alpha with expected net edge {rotationTrade['net_edge_pct']:.2%}"
-            )
-            swap_result = await asyncio.wait_for(
+        async def submit_rotation(mev_protection):
+            return await asyncio.wait_for(
                 self.sub.swap_stake(
                     wallet=self.wallet,
                     hotkey_ss58=rotationTrade['hotkey'],
@@ -1182,37 +1193,63 @@ class BittensorUtility():
                     safe_swapping=True,
                     allow_partial_stake=False,
                     rate_tolerance=rotationTrade['max_slippage'],
-                    mev_protection=rotationTrade['mev_protection'],
+                    mev_protection=mev_protection,
                     wait_for_inclusion=True,
                     wait_for_finalization=False,
-                    wait_for_revealed_execution=rotationTrade['mev_protection'],
+                    wait_for_revealed_execution=mev_protection,
                 ),
                 timeout=60.0
             )
+
+        def record_rotation_fill():
+            if _strategy_engine is not None:
+                try:
+                    _strategy_engine.on_fill(
+                        netuid=rotationTrade['origin_netuid'], side='sell',
+                        tao_amount=rotationTrade['approx_tao'],
+                        alpha_amount=float(rotationTrade['alpha_amount']),
+                        price=self.stats[rotationTrade['origin_netuid']]['price'],
+                    )
+                    _strategy_engine.on_fill(
+                        netuid=rotationTrade['destination_netuid'], side='buy',
+                        tao_amount=max(0.0, rotationTrade['approx_tao'] - rotationTrade['estimated_fee_tao']),
+                        alpha_amount=rotationTrade['simulated_destination_alpha'],
+                        price=self.stats[rotationTrade['destination_netuid']]['price'],
+                    )
+                except Exception as e:
+                    logger.error(f'Brains on_fill error (rotation): {e}')
+
+        try:
+            logger.info(
+                f"Attempting atomic swap from sn{rotationTrade['origin_netuid']} to sn{rotationTrade['destination_netuid']} "
+                f"for {float(rotationTrade['alpha_amount'])} alpha with expected net edge {rotationTrade['net_edge_pct']:.2%}"
+            )
+            swap_result = await submit_rotation(rotationTrade['mev_protection'])
             print(f'after rotation {str(rotationTrade)}')
             if swap_result is True or swap_result.__dict__.get('success') is True:
                 logger.info(
                     f"Rotation swap executed: sn{rotationTrade['origin_netuid']} -> sn{rotationTrade['destination_netuid']} | "
                     f"{rotationTrade['rotation_reason']}"
                 )
-                if _strategy_engine is not None:
-                    try:
-                        _strategy_engine.on_fill(
-                            netuid=rotationTrade['origin_netuid'], side='sell',
-                            tao_amount=rotationTrade['approx_tao'],
-                            alpha_amount=float(rotationTrade['alpha_amount']),
-                            price=self.stats[rotationTrade['origin_netuid']]['price'],
-                        )
-                        _strategy_engine.on_fill(
-                            netuid=rotationTrade['destination_netuid'], side='buy',
-                            tao_amount=max(0.0, rotationTrade['approx_tao'] - rotationTrade['estimated_fee_tao']),
-                            alpha_amount=rotationTrade['simulated_destination_alpha'],
-                            price=self.stats[rotationTrade['destination_netuid']]['price'],
-                        )
-                    except Exception as e:
-                        logger.error(f'Brains on_fill error (rotation): {e}')
+                record_rotation_fill()
                 return True
-            block_reason = self._extract_execution_block_reason(str(swap_result))
+            swap_result_text = str(swap_result)
+            if rotationTrade['mev_protection'] and self._mev_rotation_outcome_failed(swap_result_text):
+                logger.warning(
+                    f"Shielded rotation outcome unavailable for sn{rotationTrade['origin_netuid']} -> "
+                    f"sn{rotationTrade['destination_netuid']}; retrying without MEV protection"
+                )
+                retry_result = await submit_rotation(False)
+                if retry_result is True or retry_result.__dict__.get('success') is True:
+                    logger.info(
+                        f"Rotation swap executed without MEV fallback: sn{rotationTrade['origin_netuid']} -> "
+                        f"sn{rotationTrade['destination_netuid']} | {rotationTrade['rotation_reason']}"
+                    )
+                    record_rotation_fill()
+                    return True
+                swap_result = retry_result
+                swap_result_text = str(retry_result)
+            block_reason = self._extract_execution_block_reason(swap_result_text)
             if block_reason:
                 self._block_subnet_execution(rotationTrade['destination_netuid'], block_reason)
             logger.info(f"Failed rotation swap {rotationTrade} ({str(swap_result)})")
