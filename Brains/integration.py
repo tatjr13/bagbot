@@ -210,8 +210,8 @@ class StrategyEngine:
         }
 
         candidate_rows = []
-        next_patches: Dict[int, ThresholdPatch] = {}
-        next_dynamic_subnet_grids: Dict[int, Dict] = {}
+        next_patches: Dict[int, ThresholdPatch] = dict(self.patches)
+        next_dynamic_subnet_grids: Dict[int, Dict] = dict(self.dynamic_subnet_grids)
 
         for netuid in sorted(stats.keys()):
             if netuid not in stats:
@@ -261,7 +261,7 @@ class StrategyEngine:
             daily_buy, daily_sell = self.bar_store.get_daily_turnover(netuid, now)
 
             # Compute thresholds
-            patch = compute_thresholds(
+            fresh_patch = compute_thresholds(
                 snap=snap,
                 state=state,
                 preset=preset,
@@ -273,6 +273,7 @@ class StrategyEngine:
                 now=now,
             )
 
+            patch = fresh_patch or self.patches.get(netuid)
             if patch is not None:
                 score = self._candidate_score(
                     snap=snap,
@@ -293,13 +294,15 @@ class StrategyEngine:
                     'is_held': netuid in held_netuids,
                 })
 
+            if fresh_patch is not None:
+                next_patches[netuid] = fresh_patch
                 # Update state
                 state.last_patch_at = now
-                state.last_buy_lower = patch.buy_lower
-                state.last_buy_upper = patch.buy_upper
-                state.last_sell_lower = patch.sell_lower
-                state.last_sell_upper = patch.sell_upper
-                state.regime = patch.regime
+                state.last_buy_lower = fresh_patch.buy_lower
+                state.last_buy_upper = fresh_patch.buy_upper
+                state.last_sell_lower = fresh_patch.sell_lower
+                state.last_sell_upper = fresh_patch.sell_upper
+                state.regime = fresh_patch.regime
                 self.state_store.save()
 
         ranked_rows = sorted(candidate_rows, key=lambda row: row['score'], reverse=True)

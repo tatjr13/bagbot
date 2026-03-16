@@ -134,6 +134,32 @@ class TestStrategyRuntimeRoster(unittest.TestCase):
         self.assertIn(22, engine.buy_roster_netuids)
         self.assertFalse(engine.get_patch(11).enable_buys)
 
+    def test_runtime_roster_persists_across_threshold_cooldown_ticks(self):
+        engine = self._make_engine()
+        self._seed_history(engine)
+
+        stats = {
+            11: {'price': 1.00, 'tao_in': 5000.0, 'alpha_in': 5000.0},
+            22: {'price': 0.90, 'tao_in': 7000.0, 'alpha_in': 7000.0},
+        }
+
+        self._run_tick(engine, stats, stake_info={}, balance=10.0)
+        self.assertEqual(engine.runtime_ordered_netuids, [22])
+        self.assertIn(22, engine.buy_roster_netuids)
+        first_patch = engine.get_patch(22)
+        self.assertIsNotNone(first_patch)
+
+        cooldown_cfg = dict(TEST_CFG)
+        cooldown_cfg['min_minutes_between_threshold_updates'] = 60
+        with patch('Brains.config.load_config', return_value=cooldown_cfg):
+            engine.on_tick(stats, self.settings.SUBNET_SETTINGS, stake_info={}, balance=10.0)
+
+        runtime_grids = engine.get_runtime_subnet_grids(self.settings.SUBNET_SETTINGS)
+        self.assertEqual(list(runtime_grids.keys()), [22])
+        self.assertEqual(engine.runtime_ordered_netuids, [22])
+        self.assertIn(22, engine.buy_roster_netuids)
+        self.assertIs(engine.get_patch(22), first_patch)
+
 
 if __name__ == '__main__':
     unittest.main()
