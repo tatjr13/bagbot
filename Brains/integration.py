@@ -40,22 +40,9 @@ class StrategyEngine:
         self.max_live = self.cfg.get('max_live_subnets', 3)
         self.bar_minutes = self.cfg.get('bar_size_minutes', 15)
 
-        # Setup Telegram if configured
-        token_path = getattr(bagbot_settings, 'TELEGRAM_TOKEN_PATH', '')
-        if not token_path:
-            # Fallback: look for token file next to bagbot.py
-            default_token = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                         'bagbot_telegram_token.env')
-            if os.path.exists(default_token):
-                token_path = default_token
-        if token_path:
-            try:
-                from Brains.telegram_cmds import setup_telegram
-                self.telegram = setup_telegram(self, token_path)
-            except ImportError:
-                logger.warning('python-telegram-bot not installed, skipping Telegram')
-            except Exception as e:
-                logger.error(f'Telegram setup failed: {e}')
+        # Telegram notifications via stub logger (Arbos handles actual Telegram UI)
+        from Brains.telegram_cmds import setup_telegram
+        self.telegram = setup_telegram(self)
 
         logger.info(
             f'Brains initialized: dry_run={self.dry_run}, risk={self.risk_mode}, '

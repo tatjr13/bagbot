@@ -2,5 +2,4 @@ websockets
 rich
 bittensor
 bittensor-cli
-python-telegram-bot>=20.0
 pyyaml
