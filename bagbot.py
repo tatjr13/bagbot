@@ -13,7 +13,7 @@ import async_substrate_interface
 
 import printHelpers
 from decimal import Decimal, getcontext
-getcontext().prec = 16 #Precision for price stuff
+getcontext().prec = 14 #Precision for price stuff
 
 from rich.console import Console
 console = Console()
@@ -24,6 +24,7 @@ import sys
 from types import SimpleNamespace
 
 class InvalidSettings(Exception): pass
+class InternetIssueException(Exception): pass
 
 # Configure logging.
 logging.basicConfig(
@@ -35,6 +36,12 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+def print_link(url: str, text: str | None = None) -> None:
+    if text is None:
+        text = url
+    # \x1b = ESC
+    print(f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
 
 def load_safe_python_settings():
     settings = {}
@@ -263,7 +270,7 @@ class BittensorUtility():
                     self.subnet_grids[subnet_id]['sell_lower'] = self.subnet_grids[subnet_id]['sell']
                 else:
                     raise InvalidSettings(f'"sell_lower" missing for subnet {subnet_id} in bagbot_settings.SUBNET_SETTINGS')
-            if not self.subnet_grids[subnet_id].get('buy_upper'):
+            if self.subnet_grids[subnet_id].get('buy_upper') is None:
                 if self.subnet_grids[subnet_id].get('buy') is not None:
                     self.subnet_grids[subnet_id]['buy_upper'] = self.subnet_grids[subnet_id]['buy']
                 else:
@@ -352,7 +359,7 @@ class BittensorUtility():
             except asyncio.exceptions.TimeoutError:
                 logger.info('Timeout fetching hotkey stake')
                 await asyncio.sleep(10)
-        raise Exception("Too many attempts to refresh stats")
+        raise InternetIssueException("Too many attempts to refresh stats")
 
 
     async def refresh_stats(self, hotkeys):
@@ -417,11 +424,14 @@ class BittensorUtility():
                 printHelpers.print_table_rich(self, console, self.current_stake_info, list(bagbot_settings.SUBNET_SETTINGS.keys()), self.stats, self.balance, self.subnet_grids)
                 if self.tick == 1 and not self.args.nocheck:
                     loop = asyncio.get_event_loop()
+                    allSubnetParams = '&var-target_subnets='.join([str(k) for k in self.subnet_grids])
+                    print(f"Link to portfolio on taoflute: https://taoflute.com/d/5c216965-b99b-4d82-8b31-931bb3d71567/subnets-overview?orgId=1&var-target_subnets={allSubnetParams}\n")
                     user_input = await loop.run_in_executor(None, input, "Should the bot proceed? (Y/N): ")
                     if user_input.lower() != 'y':
                         print('Exiting...')
                         return
 
+                print_link(f"https://taoflute.com/d/5c216965-b99b-4d82-8b31-931bb3d71567/subnets-overview?orgId=1&var-target_subnets={allSubnetParams}", 'Taoflute Portfolio link')
                 logger.info(f'Tick {self.tick}: Checking trades')
                 for subnet_netuid in bagbot_settings.SUBNET_SETTINGS:
                     await self.do_available_trades(subnet_netuid)
@@ -438,6 +448,9 @@ class BittensorUtility():
                 except (OSError, KeyError):
                     await asyncio.sleep(12) #if error with waiting for block, just wait approx 1 block and try again
 
+            except InternetIssueException:
+                logger.warning(f'Some internet issue must be happening, pausing for 1 minute...')
+                await asyncio.sleep(60)
             except asyncio.exceptions.CancelledError:
                 logger.info(f'Asyncio exception, retrying...')
                 await asyncio.sleep(3)
@@ -668,7 +681,7 @@ class BittensorUtility():
                     timeout=45.0
                 )
                 print(f'after buy {str(buyTrade)}')
-                if stake_result is True:
+                if stake_result is True or stake_result.__dict__.get('success') is True:
                     logger.info(f"Staked {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
                 else:
                     logger.info(f"Failed to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
