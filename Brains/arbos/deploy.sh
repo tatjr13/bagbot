@@ -5,6 +5,7 @@
 # Prerequisites:
 #   - SSH access to bagbot-targon configured in ~/.ssh/config
 #   - Token files in project root: bagbot_telegram_token.env, bagbot_chutes_api.env
+#   - Optional: TAOSTATS_API_KEY exported in shell, or bagbot_taostats_api.env present
 
 set -euo pipefail
 
@@ -21,6 +22,11 @@ echo ""
 # Read tokens from local env files
 TELEGRAM_TOKEN=$(grep -oP 'TELEGRAM_TOKEN=\K.*' "$PROJECT_DIR/bagbot_telegram_token.env" | tr -d '"' | tr -d "'")
 CHUTES_KEY=$(grep -oP 'CHUTES_API_KEY=\K.*' "$PROJECT_DIR/bagbot_chutes_api.env" | tr -d '"' | tr -d "'")
+TAOSTATS_KEY="${TAOSTATS_API_KEY:-}"
+
+if [ -z "$TAOSTATS_KEY" ] && [ -f "$PROJECT_DIR/bagbot_taostats_api.env" ]; then
+    TAOSTATS_KEY=$(grep -oP 'TAOSTATS_API_KEY=\K.*' "$PROJECT_DIR/bagbot_taostats_api.env" | tr -d '"' | tr -d "'")
+fi
 
 if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$CHUTES_KEY" ]; then
     echo "ERROR: Missing tokens in bagbot_telegram_token.env or bagbot_chutes_api.env"
@@ -44,10 +50,16 @@ ssh "$REMOTE" "cat > $REMOTE_DIR/Arbos/.env << ENVEOF
 TAU_BOT_TOKEN=$TELEGRAM_TOKEN
 PROVIDER=chutes
 CHUTES_API_KEY=$CHUTES_KEY
-CLAUDE_MODEL=default:throughput
+# Keep the visible Claude-side model stable, but force Chutes routing explicitly
+# so the deployment does not depend on the account-level `default` alias.
+CLAUDE_MODEL=openai/gpt-oss-120b-TEE
+CHUTES_ROUTING_AGENT=openai/gpt-oss-120b-TEE,MiniMaxAI/MiniMax-M2.5-TEE,deepseek-ai/DeepSeek-V3.1-TEE,moonshotai/Kimi-K2.5-TEE:throughput
+CHUTES_ROUTING_BOT=openai/gpt-oss-120b-TEE,MiniMaxAI/MiniMax-M2.5-TEE,deepseek-ai/DeepSeek-V3.1-TEE,moonshotai/Kimi-K2.5-TEE:latency
 PROXY_PORT=8090
 COST_PER_M_INPUT=0
 COST_PER_M_OUTPUT=0
+TAOSTATS_API_KEY=$TAOSTATS_KEY
+TAOSTATS_RATE_LIMIT_PER_MIN=5
 ENVEOF
 chmod 600 $REMOTE_DIR/Arbos/.env
 "

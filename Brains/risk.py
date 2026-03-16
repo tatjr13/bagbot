@@ -68,7 +68,9 @@ def apply_regime_adjustments(
     sell_low_off: float, sell_high_off: float,
     regime: str, inventory_pct: float,
     vol_mult: float, est_slippage_pct: float,
-    confidence: float
+    confidence: float,
+    freeze_buys_if_confidence_lt: float = 0.5,
+    de_risk_only_if_confidence_lt: float = 0.7,
 ) -> Tuple[float, float, float, float, float, float, bool]:
     """Apply regime-based and condition-based offset adjustments.
 
@@ -119,10 +121,14 @@ def apply_regime_adjustments(
         buy_low_off -= 0.005 * c
         sell_high_off += 0.005 * c
 
-    # Confidence gates: when confidence is low, only allow de-risking
-    if confidence < 0.5:
+    # Confidence gates: when confidence is low, only allow de-risking.
+    de_risk_only_if_confidence_lt = max(
+        de_risk_only_if_confidence_lt,
+        freeze_buys_if_confidence_lt,
+    )
+    if confidence < freeze_buys_if_confidence_lt:
         enable_buys = False
-    elif confidence < 0.7:
+    elif confidence < de_risk_only_if_confidence_lt:
         # Only allow shrinkage / de-risking adjustments
         # Don't widen buy zone (don't buy more aggressively)
         buy_size_mult = min(buy_size_mult, 0.5)

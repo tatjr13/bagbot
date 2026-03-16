@@ -94,6 +94,19 @@ def load_safe_python_settings():
 
     return SimpleNamespace(**settings)
 
+
+def _settings_signature():
+    """Return a cheap signature for the settings files so we can hot-reload safely."""
+    exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(".")
+    signature = []
+    for filename in ("bagbot_settings.py", "bagbot_settings_overrides.py"):
+        path = exe_dir / filename
+        try:
+            signature.append((filename, path.stat().st_mtime_ns))
+        except FileNotFoundError:
+            signature.append((filename, None))
+    return tuple(signature)
+
 bagbot_settings = load_safe_python_settings()
 
 # Brains strategy engine (optional, enabled via BRAINS_ENABLED in settings)
@@ -140,6 +153,8 @@ class BittensorUtility():
         self.current_stake_info = {}
         self.tick = 0
         self.gridLoaded = False
+        self.settings_signature = None
+        self.subnet_grids = {}
 
 
     def get_subnet_setting(self, subnet_netuid, setting_name, default_value):
@@ -265,10 +280,28 @@ class BittensorUtility():
 
 
     async def refresh_subnet_grid(self):
-        if not self.gridLoaded:
-            self.subnet_grids = bagbot_settings.SUBNET_SETTINGS
-            self.validateGrid()
+        global bagbot_settings
+
+        current_signature = _settings_signature()
+        if self.gridLoaded and current_signature == self.settings_signature:
+            return
+
+        bagbot_settings = load_safe_python_settings()
+        self.settings_signature = current_signature
+        self.subnet_grids = {
+            netuid: dict(config)
+            for netuid, config in getattr(bagbot_settings, 'SUBNET_SETTINGS', {}).items()
+        }
+        self.validateGrid()
         self.gridLoaded = True
+
+        if _strategy_engine is not None:
+            try:
+                _strategy_engine.refresh_runtime_settings(bagbot_settings)
+            except Exception as e:
+                logger.error(f'Brains settings refresh error: {e}')
+
+        logger.info(f'Loaded subnet settings for netuids: {sorted(self.subnet_grids.keys())}')
 
     def validateGrid(self):
         for subnet_id in self.subnet_grids:
@@ -443,10 +476,10 @@ class BittensorUtility():
                         logger.error(f'Brains on_tick error: {e}')
 
                 logger.info(f'Tick {self.tick}: Printing table')
-                printHelpers.print_table_rich(self, console, self.current_stake_info, list(bagbot_settings.SUBNET_SETTINGS.keys()), self.stats, self.balance, self.subnet_grids)
+                printHelpers.print_table_rich(self, console, self.current_stake_info, list(self.subnet_grids.keys()), self.stats, self.balance, self.subnet_grids)
+                allSubnetParams = '&var-target_subnets='.join([str(k) for k in self.subnet_grids])
                 if self.tick == 1 and not self.args.nocheck:
                     loop = asyncio.get_event_loop()
-                    allSubnetParams = '&var-target_subnets='.join([str(k) for k in self.subnet_grids])
                     print(f"Link to portfolio on taoflute: https://taoflute.com/d/5c216965-b99b-4d82-8b31-931bb3d71567/subnets-overview?orgId=1&var-target_subnets={allSubnetParams}\n")
                     user_input = await loop.run_in_executor(None, input, "Should the bot proceed? (Y/N): ")
                     if user_input.lower() != 'y':
@@ -455,8 +488,12 @@ class BittensorUtility():
 
                 print_link(f"https://taoflute.com/d/5c216965-b99b-4d82-8b31-931bb3d71567/subnets-overview?orgId=1&var-target_subnets={allSubnetParams}", 'Taoflute Portfolio link')
                 logger.info(f'Tick {self.tick}: Checking trades')
-                for subnet_netuid in bagbot_settings.SUBNET_SETTINGS:
-                    await self.do_available_trades(subnet_netuid)
+                rotationTrade = await self.constructRotationTrade()
+                if rotationTrade:
+                    await self.execute_rotation_trade(rotationTrade)
+                else:
+                    for subnet_netuid in self.subnet_grids:
+                        await self.do_available_trades(subnet_netuid)
 
                 logging.info(f'Finished tick {self.tick} in {time.time() - start:.2f} seconds')
                 #return
@@ -577,6 +614,16 @@ class BittensorUtility():
         return total_stake
 
 
+    def my_total_staked_value(self):
+        total_value = 0.0
+        for hotkey in self.current_stake_info:
+            for subnet_netuid, stake_obj in self.current_stake_info[hotkey].items():
+                if stake_obj is None or subnet_netuid not in self.stats:
+                    continue
+                total_value += float(stake_obj.stake) * self.stats[subnet_netuid]['price']
+        return total_value
+
+
     def determineHotKey(self, unstake_amt, subnet_netuid):
         # Prioritize the configured validator for this subnet
         configured_validator = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
@@ -604,209 +651,497 @@ class BittensorUtility():
         return min(max_token_per_buy, max_amount_with_max_slippage)
 
 
+    def _apply_live_patch(self, subnet_netuid):
+        if _strategy_engine is None:
+            return None
+        patch = _strategy_engine.get_patch(subnet_netuid)
+        if patch is None or patch.dry_run:
+            return None
 
-    def constructBuy(self, subnet_netuid):
-        # Brains guard: check if buys are disabled by strategy
-        if _strategy_engine is not None:
-            patch = _strategy_engine.get_patch(subnet_netuid)
-            if patch is not None and not patch.dry_run and not patch.enable_buys:
-                return None
+        self.subnet_grids[subnet_netuid]['buy_lower'] = patch.buy_lower
+        self.subnet_grids[subnet_netuid]['buy_upper'] = patch.buy_upper
+        self.subnet_grids[subnet_netuid]['sell_lower'] = patch.sell_lower
+        self.subnet_grids[subnet_netuid]['sell_upper'] = patch.sell_upper
+        return patch
+
+
+    def _available_remaining_budget(self):
+        portfolio_cap = getattr(bagbot_settings, 'MAX_PORTFOLIO_TAO', None)
+        if portfolio_cap is None:
+            return None
+        return max(0.0, float(portfolio_cap) - self.my_total_staked_value())
+
+
+    def _execution_fee_buffer_tao(self):
+        configured = getattr(bagbot_settings, 'EXECUTION_FEE_BUFFER_TAO', None)
+        if configured is not None:
+            return max(0.0, float(configured))
+        return 0.001 if self._mev_enabled() else 0.0002
+
+
+    def _available_spendable_balance(self):
+        tao_reserve = float(getattr(bagbot_settings, 'MIN_TAO_RESERVE', 0.0) or 0.0)
+        execution_fee_buffer = self._execution_fee_buffer_tao()
+        return max(0.0, float(self.balance) - tao_reserve - execution_fee_buffer)
+
+
+    def _rotation_constraints_active(self):
+        remaining_budget = self._available_remaining_budget()
+        spendable_balance = self._available_spendable_balance()
+        return (
+            (remaining_budget is not None and remaining_budget < 0.01) or
+            spendable_balance < 0.01
+        )
+
+
+    def _mev_enabled(self):
+        return bool(getattr(bagbot_settings, 'ENABLE_MEV_PROTECTION', False))
+
+
+    def _rotation_extrinsic_fee_buffer_tao(self):
+        return float(getattr(bagbot_settings, 'ROTATION_EXTRINSIC_FEE_BUFFER_TAO', 0.0002) or 0.0002)
+
+
+    def _limit_or_unbounded(self, raw_limit):
+        if raw_limit is None:
+            return float('inf')
+        limit = float(raw_limit)
+        if limit <= 0:
+            return float('inf')
+        return limit
+
+
+    def _slippage_exceeds_limit(self, slippage, max_slippage, epsilon=Decimal('1e-9')):
+        return Decimal(str(slippage)) - Decimal(str(max_slippage)) > epsilon
+
+
+    def _build_sell_trade(self, subnet_netuid, max_tao_per_sell, sell_threshold, hotkey, force_reason=None, preview_only=False):
+        if subnet_netuid not in self.stats or self.my_current_stake(subnet_netuid) <= 0:
+            return None
+
+        max_slippage = self.get_subnet_setting(subnet_netuid, 'max_slippage_percent_per_buy', bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)
+        unstake_target = max_tao_per_sell / self.stats[subnet_netuid]['price']
+        my_current_alpha = float(self.my_current_stake(subnet_netuid))
+        max_alpha_possible_to_sell = min(my_current_alpha, unstake_target)
+        alpha_to_sell = self.determineTokenBuyAmount(max_alpha_possible_to_sell, self.stats[subnet_netuid]['alpha_in'], max_slippage)
+        alpha_amount = bt.utils.balance.tao(alpha_to_sell, subnet_netuid)
+        approx_tao = float(Decimal(self.stats[subnet_netuid]['price']) * Decimal(alpha_to_sell))
+
+        if approx_tao > max_tao_per_sell:
+            raise Exception(f'Stopping before selling too much. approx_tao: {approx_tao}, max tao per sell: {max_tao_per_sell}, price x alpha: {self.stats[subnet_netuid]["price"]} x {alpha_to_sell} \nTO FIX: increase the max_tao_per_sell variable or increase max_slippage_percent_per_buy')
+
+        slippage = self.determineSlippage(alpha_to_sell, self.stats[subnet_netuid]['alpha_in'])
+        if self._slippage_exceeds_limit(slippage, max_slippage):
+            raise Exception(f'Stopping before selling too much, slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(max_slippage)}  \nTO FIX: increase the max_tao_per_sell variable or increase max_slippage_percent_per_buy')
+
+        if not preview_only:
+            if force_reason:
+                logger.info(
+                    f"About to rotate out of sn{subnet_netuid}: unstake {alpha_to_sell} alpha "
+                    f"(~{approx_tao} TAO) on hotkey {hotkey} with expected slippage of {slippage:.4f}% | {force_reason}"
+                )
+            else:
+                logger.info(f"About to unstake {alpha_to_sell} alpha (~{approx_tao} TAO) in sn{subnet_netuid} on hotkey {hotkey} with expected slippage of {slippage:.4f}%")
+
+        trade = {
+            'hotkey': hotkey,
+            'netuid': subnet_netuid,
+            'alpha_amount': alpha_amount,
+            'max_slippage': max_slippage / 100.0,
+            'sell_threshold': sell_threshold,
+            'calculated_slippage': slippage,
+            'approx_tao': approx_tao,
+        }
+        if force_reason:
+            trade['rotation_reason'] = force_reason
+        return trade
+
+
+
+    def constructBuy(self, subnet_netuid, ignore_balance_limits=False, preview_only=False):
+        patch = self._apply_live_patch(subnet_netuid)
+        if patch is not None and not patch.enable_buys:
+            return None
 
         current_stake_amt = self.my_current_stake(subnet_netuid)
         buy_threshold = self.get_subnet_buy_threshold(subnet_netuid)
 
-        # Get subnet-specific settings or fall back to global defaults
-        max_tao_per_buy = self.get_subnet_setting(subnet_netuid, 'max_tao_per_buy', bagbot_settings.MAX_TAO_PER_BUY)
+        max_tao_per_buy = self._limit_or_unbounded(
+            self.get_subnet_setting(subnet_netuid, 'max_tao_per_buy', bagbot_settings.MAX_TAO_PER_BUY)
+        )
         max_slippage = self.get_subnet_setting(subnet_netuid, 'max_slippage_percent_per_buy', bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)
         hotkey = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
 
-        # Brains threshold overlay: use strategy thresholds if live
-        if _strategy_engine is not None:
-            patch = _strategy_engine.get_patch(subnet_netuid)
-            if patch is not None and not patch.dry_run:
-                # Override the grid thresholds with strategy values
-                self.subnet_grids[subnet_netuid]['buy_lower'] = patch.buy_lower
-                self.subnet_grids[subnet_netuid]['buy_upper'] = patch.buy_upper
-                buy_threshold = self.get_subnet_buy_threshold(subnet_netuid)
-                # Enforce strategy size cap (take the minimum)
-                max_tao_per_buy = min(max_tao_per_buy, patch.max_tao_per_buy)
-
-        if self.balance > max_tao_per_buy:
-
-            if subnet_netuid in self.stats and self.stats[subnet_netuid]['price'] < buy_threshold and current_stake_amt < self.subnet_grids[subnet_netuid]['max_alpha']:
-                logger.info(f'''Want to buy sn{subnet_netuid} at price {self.stats[subnet_netuid]['price']} because it's lower than my threshold: {buy_threshold}, currently have {current_stake_amt} alpha in it''')
-
-                tao_amount = self.determineTokenBuyAmount(max_tao_per_buy, self.stats[subnet_netuid]['tao_in'], max_slippage)
-                slippage = self.determineSlippage(tao_amount, self.stats[subnet_netuid]['tao_in'])
-                if Decimal(slippage) > Decimal(max_slippage):
-                    raise Exception(f'Stopping before purchasing too much slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(max_slippage)}.  \nTO FIX: increase the max_tao_per_buy variable or increase max_slippage_percent_per_buy')
-                tao_amount = bt.utils.balance.tao(tao_amount)
-                trade = {
-                    'hotkey':hotkey,
-                    'netuid':subnet_netuid,
-                    'tao_amount':tao_amount,
-                    'buy_threshold':buy_threshold,
-                    'calculated_slippage':slippage,
-                    'max_slippage':max_slippage / 100.0
-                }
-                logger.info(f"About to stake {tao_amount} to {subnet_netuid} with expected slippage of {slippage:.4f}%")
-                return trade
-        else:
-            logger.info(f'Not enough balance to stake: {self.balance:.2f}')
-        return None
-
-    def constructSell(self, subnet_netuid):
-        # Brains guard: check if sells are disabled by strategy
-        if _strategy_engine is not None:
-            patch = _strategy_engine.get_patch(subnet_netuid)
-            if patch is not None and not patch.dry_run and not patch.enable_sells:
+        portfolio_cap = getattr(bagbot_settings, 'MAX_PORTFOLIO_TAO', None)
+        if not ignore_balance_limits and portfolio_cap is not None:
+            remaining_budget = self._available_remaining_budget()
+            max_tao_per_buy = min(max_tao_per_buy, remaining_budget)
+            if max_tao_per_buy < 0.01:
+                if not preview_only:
+                    logger.info(
+                        f'Portfolio cap reached or remaining budget too small to trade: '
+                        f'cap={float(portfolio_cap):.4f}, remaining={remaining_budget:.4f}'
+                    )
                 return None
 
-        current_stake_amt = self.my_current_stake(subnet_netuid)
-        sell_threshold = self.get_subnet_sell_threshold(subnet_netuid)
+        tao_reserve = float(getattr(bagbot_settings, 'MIN_TAO_RESERVE', 0.0) or 0.0)
+        execution_fee_buffer = self._execution_fee_buffer_tao()
+        if not ignore_balance_limits:
+            spendable_balance = self._available_spendable_balance()
+            max_tao_per_buy = min(max_tao_per_buy, spendable_balance)
+            if max_tao_per_buy < 0.01:
+                if not preview_only:
+                    logger.info(
+                        f'Fee buffer reached or remaining spendable balance too small to trade: '
+                        f'reserve={tao_reserve:.4f}, fee_buffer={execution_fee_buffer:.4f}, balance={float(self.balance):.4f}, '
+                        f'spendable={spendable_balance:.4f}'
+                    )
+                return None
 
-        # Get subnet-specific settings or fall back to global defaults
-        max_tao_per_sell = self.get_subnet_setting(subnet_netuid, 'max_tao_per_sell', bagbot_settings.MAX_TAO_PER_SELL)
-        max_slippage = self.get_subnet_setting(subnet_netuid, 'max_slippage_percent_per_buy', bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)
+        if patch is not None:
+            buy_threshold = self.get_subnet_buy_threshold(subnet_netuid)
+            patch_limit = getattr(patch, 'max_tao_per_buy', None)
+            if patch_limit is not None:
+                max_tao_per_buy = min(max_tao_per_buy, float(patch_limit))
 
-        # Brains threshold overlay: use strategy thresholds if live
-        if _strategy_engine is not None:
-            patch = _strategy_engine.get_patch(subnet_netuid)
-            if patch is not None and not patch.dry_run:
-                self.subnet_grids[subnet_netuid]['sell_lower'] = patch.sell_lower
-                self.subnet_grids[subnet_netuid]['sell_upper'] = patch.sell_upper
-                sell_threshold = self.get_subnet_sell_threshold(subnet_netuid)
-                max_tao_per_sell = min(max_tao_per_sell, patch.max_tao_per_sell)
+        if not ignore_balance_limits:
+            max_tao_per_buy = min(max_tao_per_buy, float(self.balance))
+            if max_tao_per_buy < 0.01:
+                if not preview_only:
+                    logger.info(f'Not enough balance to stake: {self.balance:.2f}')
+                return None
 
-        if subnet_netuid in self.stats and \
-            self.stats[subnet_netuid]['price'] > sell_threshold and \
-            self.my_current_stake(subnet_netuid) > 0:
+        if subnet_netuid in self.stats and self.stats[subnet_netuid]['price'] < buy_threshold and current_stake_amt < self.subnet_grids[subnet_netuid]['max_alpha']:
+            if not preview_only:
+                logger.info(f'''Want to buy sn{subnet_netuid} at price {self.stats[subnet_netuid]['price']} because it's lower than my threshold: {buy_threshold}, currently have {current_stake_amt} alpha in it''')
 
-            unstake_target = max_tao_per_sell / self.stats[subnet_netuid]['price']
-            my_current_alpha = float(self.my_current_stake(subnet_netuid))
-            max_alpha_possible_to_sell = min(my_current_alpha, unstake_target)
-            alpha_to_sell = self.determineTokenBuyAmount(max_alpha_possible_to_sell, self.stats[subnet_netuid]['alpha_in'], max_slippage)
-            alpha_amount = bt.utils.balance.tao(alpha_to_sell, subnet_netuid)
-
-            hotkey = self.determineHotKey(alpha_to_sell, subnet_netuid)
-            approx_tao = float(Decimal(self.stats[subnet_netuid]['price']) * Decimal(alpha_to_sell))
-
-            if approx_tao > max_tao_per_sell:
-                raise Exception(f'Stopping before selling too much. approx_tao: {approx_tao}, max tao per sell: {max_tao_per_sell}, price x alpha: {self.stats[subnet_netuid]["price"]} x {alpha_to_sell} \nTO FIX: increase the max_tao_per_sell variable or increase max_slippage_percent_per_buy')
-
-            slippage = self.determineSlippage(alpha_to_sell, self.stats[subnet_netuid]['alpha_in'])
-            if Decimal(slippage) > Decimal(max_slippage):
-                raise Exception(f'Stopping before selling too much, slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(max_slippage)}  \nTO FIX: increase the max_tao_per_sell variable or increase max_slippage_percent_per_buy')
-
-            logger.info(f"About to unstake {alpha_to_sell} alpha (~{approx_tao} TAO) in sn{subnet_netuid} on hotkey {hotkey} with expected slippage of {slippage:.4f}%")
-
+            tao_amount = self.determineTokenBuyAmount(max_tao_per_buy, self.stats[subnet_netuid]['tao_in'], max_slippage)
+            slippage = self.determineSlippage(tao_amount, self.stats[subnet_netuid]['tao_in'])
+            if self._slippage_exceeds_limit(slippage, max_slippage):
+                raise Exception(f'Stopping before purchasing too much slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(max_slippage)}.  \nTO FIX: increase the max_tao_per_buy variable or increase max_slippage_percent_per_buy')
+            tao_amount = bt.utils.balance.tao(tao_amount)
             trade = {
                 'hotkey':hotkey,
                 'netuid':subnet_netuid,
-                'alpha_amount':alpha_amount,
-                'max_slippage':max_slippage / 100.0,
-                'sell_threshold':sell_threshold,
+                'tao_amount':tao_amount,
+                'buy_threshold':buy_threshold,
                 'calculated_slippage':slippage,
-                'approx_tao': approx_tao,
+                'max_slippage':max_slippage / 100.0
             }
+            if not preview_only:
+                logger.info(f"About to stake {tao_amount} to {subnet_netuid} with expected slippage of {slippage:.4f}%")
             return trade
+        if not ignore_balance_limits and not preview_only and max_tao_per_buy < float('inf') and self.balance < max_tao_per_buy:
+            logger.info(f'Not enough balance to stake: {self.balance:.2f}')
+        return None
+
+    def constructSell(self, subnet_netuid, force_sell=False, desired_tao=None, force_reason=None, preview_only=False):
+        patch = self._apply_live_patch(subnet_netuid)
+        if patch is not None and not patch.enable_sells and not force_sell:
+            return None
+
+        sell_threshold = self.get_subnet_sell_threshold(subnet_netuid)
+        max_tao_per_sell = self._limit_or_unbounded(
+            self.get_subnet_setting(subnet_netuid, 'max_tao_per_sell', bagbot_settings.MAX_TAO_PER_SELL)
+        )
+
+        if patch is not None:
+            sell_threshold = self.get_subnet_sell_threshold(subnet_netuid)
+            patch_limit = getattr(patch, 'max_tao_per_sell', None)
+            if patch_limit is not None:
+                max_tao_per_sell = min(max_tao_per_sell, float(patch_limit))
+
+        if desired_tao is not None:
+            max_tao_per_sell = min(max_tao_per_sell, desired_tao)
+
+        if subnet_netuid in self.stats and self.my_current_stake(subnet_netuid) > 0:
+            hotkey = self.determineHotKey(max_tao_per_sell / self.stats[subnet_netuid]['price'], subnet_netuid)
+            if hotkey is None:
+                return None
+
+            if force_sell or self.stats[subnet_netuid]['price'] > sell_threshold:
+                return self._build_sell_trade(
+                    subnet_netuid=subnet_netuid,
+                    max_tao_per_sell=max_tao_per_sell,
+                    sell_threshold=sell_threshold,
+                    hotkey=hotkey,
+                    force_reason=force_reason,
+                    preview_only=preview_only,
+                )
 
         return None
+
+
+    async def constructRotationTrade(self):
+        if not getattr(bagbot_settings, 'ENABLE_POSITION_ROTATION', False):
+            return None
+        if not getattr(bagbot_settings, 'ENABLE_ATOMIC_ROTATION', True):
+            return None
+        if getattr(bagbot_settings, 'ROTATION_REQUIRE_CONSTRAINTS', False) and not self._rotation_constraints_active():
+            return None
+
+        target_discount_floor = float(getattr(bagbot_settings, 'ROTATION_TARGET_DISCOUNT_PCT', 0.02) or 0.02)
+        source_weakness_floor = float(getattr(bagbot_settings, 'ROTATION_SOURCE_WEAKNESS_PCT', 0.02) or 0.02)
+        min_net_edge_pct = float(getattr(bagbot_settings, 'ROTATION_MIN_NET_EDGE_PCT', 0.01) or 0.01)
+        extrinsic_fee_buffer_tao = self._rotation_extrinsic_fee_buffer_tao()
+
+        best_trade = None
+        for target_netuid in self.subnet_grids:
+            buy_trade = self.constructBuy(target_netuid, ignore_balance_limits=True, preview_only=True)
+            if buy_trade is None:
+                continue
+
+            buy_threshold = float(buy_trade['buy_threshold'])
+            if buy_threshold <= 0:
+                continue
+
+            discount_pct = max(0.0, (buy_threshold - self.stats[target_netuid]['price']) / buy_threshold)
+            if discount_pct < target_discount_floor:
+                continue
+
+            desired_tao = float(buy_trade['tao_amount'])
+            for source_netuid in self.subnet_grids:
+                if source_netuid == target_netuid:
+                    continue
+                if self.my_current_stake(source_netuid) <= 0 or source_netuid not in self.stats:
+                    continue
+
+                sell_trade = self.constructSell(
+                    source_netuid,
+                    force_sell=True,
+                    desired_tao=desired_tao,
+                    preview_only=True,
+                )
+                if sell_trade is None:
+                    continue
+
+                sell_threshold = float(sell_trade['sell_threshold'])
+                if sell_threshold <= 0:
+                    continue
+
+                weakness_pct = max(0.0, (sell_threshold - self.stats[source_netuid]['price']) / sell_threshold)
+                if weakness_pct < source_weakness_floor:
+                    continue
+
+                if sell_trade['hotkey'] != buy_trade['hotkey']:
+                    continue
+
+                sim_result = await self.sub.sim_swap(
+                    origin_netuid=source_netuid,
+                    destination_netuid=target_netuid,
+                    amount=sell_trade['alpha_amount'],
+                )
+                movement_fee_tao = float(sim_result.tao_fee)
+                alpha_fee_tao = float(sim_result.alpha_fee) * self.stats[target_netuid]['price']
+                estimated_total_fee_tao = movement_fee_tao + alpha_fee_tao + extrinsic_fee_buffer_tao
+                gross_edge_pct = discount_pct + weakness_pct
+                fee_drag_pct = estimated_total_fee_tao / sell_trade['approx_tao'] if sell_trade['approx_tao'] > 0 else 1.0
+                net_edge_pct = gross_edge_pct - fee_drag_pct
+                if net_edge_pct < min_net_edge_pct:
+                    continue
+
+                if best_trade is None or net_edge_pct > best_trade['net_edge_pct']:
+                    best_trade = {
+                        'type': 'rotation_swap',
+                        'hotkey': sell_trade['hotkey'],
+                        'origin_netuid': source_netuid,
+                        'destination_netuid': target_netuid,
+                        'alpha_amount': sell_trade['alpha_amount'],
+                        'approx_tao': sell_trade['approx_tao'],
+                        'max_slippage': min(sell_trade['max_slippage'], buy_trade['max_slippage']),
+                        'source_sell_threshold': sell_trade['sell_threshold'],
+                        'target_buy_threshold': buy_trade['buy_threshold'],
+                        'rotation_reason': (
+                            f'rotation_to_sn{target_netuid}: target is {discount_pct:.2%} below its buy threshold '
+                            f'while sn{source_netuid} is {weakness_pct:.2%} below its sell threshold; '
+                            f'fee_drag={fee_drag_pct:.2%}; net_edge={net_edge_pct:.2%}'
+                        ),
+                        'discount_pct': discount_pct,
+                        'weakness_pct': weakness_pct,
+                        'gross_edge_pct': gross_edge_pct,
+                        'net_edge_pct': net_edge_pct,
+                        'estimated_fee_tao': estimated_total_fee_tao,
+                        'simulated_destination_alpha': float(sim_result.alpha_amount),
+                        'mev_protection': self._mev_enabled(),
+                    }
+
+        return best_trade
+
+
+    async def execute_buy_trade(self, buyTrade):
+        try:
+            logger.info(f"Attempting to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']}")
+            mev_protection = self._mev_enabled()
+            stake_result = await asyncio.wait_for(
+                self.sub.add_stake(
+                    wallet=self.wallet,
+                    hotkey_ss58=buyTrade['hotkey'],
+                    netuid=buyTrade['netuid'],
+                    amount=buyTrade['tao_amount'],
+                    rate_tolerance=buyTrade['max_slippage'],
+                    wait_for_inclusion=mev_protection,
+                    wait_for_finalization=False,
+                    safe_staking=True,
+                    allow_partial_stake=False,
+                    mev_protection=mev_protection,
+                    wait_for_revealed_execution=mev_protection,
+                ),
+                timeout=45.0
+            )
+            print(f'after buy {str(buyTrade)}')
+            if stake_result is True or stake_result.__dict__.get('success') is True:
+                logger.info(f"Staked {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
+                if _strategy_engine is not None:
+                    try:
+                        est_alpha = float(buyTrade['tao_amount']) / self.stats[buyTrade['netuid']]['price'] if self.stats[buyTrade['netuid']]['price'] > 0 else 0
+                        _strategy_engine.on_fill(
+                            netuid=buyTrade['netuid'], side='buy',
+                            tao_amount=float(buyTrade['tao_amount']),
+                            alpha_amount=est_alpha,
+                            price=self.stats[buyTrade['netuid']]['price'],
+                        )
+                    except Exception as e:
+                        logger.error(f'Brains on_fill error (buy): {e}')
+            else:
+                logger.info(f"Failed to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout staking on subnet {buyTrade['netuid']} after 45s")
+        except Exception as e:
+            print(f'ERROR staking')
+            logger.error(traceback.format_exc())
+            logger.error(f"Failed to stake on subnet {buyTrade['netuid']}: {e}")
+
+
+    async def execute_sell_trade(self, sellTrade):
+        try:
+            logger.info(f"Attempting to unstake {float(sellTrade['alpha_amount'])} alpha from subnet {sellTrade['netuid']}")
+            mev_protection = self._mev_enabled()
+            unstake_result = await asyncio.wait_for(
+                self.sub.unstake(
+                    wallet=self.wallet,
+                    hotkey_ss58=sellTrade['hotkey'] ,
+                    netuid=sellTrade['netuid'],
+                    amount=sellTrade['alpha_amount'],
+                    rate_tolerance=sellTrade['max_slippage'],
+                    wait_for_inclusion=True,
+                    wait_for_finalization=False,
+                    safe_unstaking=True,
+                    allow_partial_stake=False,
+                    mev_protection=mev_protection,
+                    wait_for_revealed_execution=mev_protection,
+                ),
+                timeout=60.0
+            )
+            print(f'after sell {str(sellTrade)}')
+            if unstake_result is True or unstake_result.__dict__.get('success') is True:
+                if sellTrade.get('rotation_reason'):
+                    logger.info(f"Rotation exit executed on sn{sellTrade['netuid']}: {sellTrade['rotation_reason']}")
+                logger.info(f"Unstaked {float(sellTrade['alpha_amount'])} stake units from sn{sellTrade['netuid']} (approx. {sellTrade['approx_tao']:.4f} TAO value) at price: {self.stats[sellTrade['netuid']]['price']}.  my threshold = {sellTrade['sell_threshold']}")
+                if _strategy_engine is not None:
+                    try:
+                        _strategy_engine.on_fill(
+                            netuid=sellTrade['netuid'], side='sell',
+                            tao_amount=sellTrade['approx_tao'],
+                            alpha_amount=float(sellTrade['alpha_amount']),
+                            price=self.stats[sellTrade['netuid']]['price'],
+                        )
+                    except Exception as e:
+                        logger.error(f'Brains on_fill error (sell): {e}')
+            else:
+                logger.info(f"Failed to unstake {str(sellTrade)}  sn{sellTrade['netuid']} ({str(unstake_result)})")
+        except asyncio.TimeoutError:
+            msg = f"Timeout unstaking from subnet {sellTrade['netuid']} after 60s"
+            print(msg)
+            logger.error(msg)
+            self.sub = await my_async_subtensor("finney")
+        except (asyncio.exceptions.CancelledError, asyncio.exceptions.InvalidStateError) as e:
+            print(f'ERROR unstaking - {e}... continuing')
+            logger.error(traceback.format_exc())
+            logger.error(f"Failed to unstake from subnet {sellTrade['netuid']}: {e}")
+            self.sub = await my_async_subtensor("finney")
+        except Exception as e:
+            print(f'ERROR unstaking')
+            logger.error(traceback.format_exc())
+            logger.error(f"Failed to unstake from subnet {sellTrade['netuid']}: {e}")
+            raise
+
+
+    async def execute_rotation_trade(self, rotationTrade):
+        try:
+            logger.info(
+                f"Attempting atomic swap from sn{rotationTrade['origin_netuid']} to sn{rotationTrade['destination_netuid']} "
+                f"for {float(rotationTrade['alpha_amount'])} alpha with expected net edge {rotationTrade['net_edge_pct']:.2%}"
+            )
+            swap_result = await asyncio.wait_for(
+                self.sub.swap_stake(
+                    wallet=self.wallet,
+                    hotkey_ss58=rotationTrade['hotkey'],
+                    origin_netuid=rotationTrade['origin_netuid'],
+                    destination_netuid=rotationTrade['destination_netuid'],
+                    amount=rotationTrade['alpha_amount'],
+                    safe_swapping=True,
+                    allow_partial_stake=False,
+                    rate_tolerance=rotationTrade['max_slippage'],
+                    mev_protection=rotationTrade['mev_protection'],
+                    wait_for_inclusion=True,
+                    wait_for_finalization=False,
+                    wait_for_revealed_execution=rotationTrade['mev_protection'],
+                ),
+                timeout=60.0
+            )
+            print(f'after rotation {str(rotationTrade)}')
+            if swap_result is True or swap_result.__dict__.get('success') is True:
+                logger.info(
+                    f"Rotation swap executed: sn{rotationTrade['origin_netuid']} -> sn{rotationTrade['destination_netuid']} | "
+                    f"{rotationTrade['rotation_reason']}"
+                )
+                if _strategy_engine is not None:
+                    try:
+                        _strategy_engine.on_fill(
+                            netuid=rotationTrade['origin_netuid'], side='sell',
+                            tao_amount=rotationTrade['approx_tao'],
+                            alpha_amount=float(rotationTrade['alpha_amount']),
+                            price=self.stats[rotationTrade['origin_netuid']]['price'],
+                        )
+                        _strategy_engine.on_fill(
+                            netuid=rotationTrade['destination_netuid'], side='buy',
+                            tao_amount=max(0.0, rotationTrade['approx_tao'] - rotationTrade['estimated_fee_tao']),
+                            alpha_amount=rotationTrade['simulated_destination_alpha'],
+                            price=self.stats[rotationTrade['destination_netuid']]['price'],
+                        )
+                    except Exception as e:
+                        logger.error(f'Brains on_fill error (rotation): {e}')
+                return True
+            logger.info(f"Failed rotation swap {rotationTrade} ({str(swap_result)})")
+            return False
+        except asyncio.TimeoutError:
+            msg = (
+                f"Timeout rotating stake from sn{rotationTrade['origin_netuid']} "
+                f"to sn{rotationTrade['destination_netuid']} after 60s"
+            )
+            print(msg)
+            logger.error(msg)
+            self.sub = await my_async_subtensor("finney")
+            return False
+        except Exception as e:
+            print('ERROR rotating')
+            logger.error(traceback.format_exc())
+            logger.error(
+                f"Failed to rotate from sn{rotationTrade['origin_netuid']} "
+                f"to sn{rotationTrade['destination_netuid']}: {e}"
+            )
+            raise
 
 
     async def do_available_trades(self, subnet_netuid):
 
         buyTrade = self.constructBuy(subnet_netuid)
         if buyTrade:
-            try:
-                logger.info(f"Attempting to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']}")
-                stake_result = await asyncio.wait_for(
-                    self.sub.add_stake(
-                        wallet=self.wallet,
-                        hotkey_ss58=buyTrade['hotkey'],
-                        netuid=buyTrade['netuid'],
-                        amount=buyTrade['tao_amount'],
-                        rate_tolerance=buyTrade['max_slippage'],
-                        wait_for_inclusion=False,
-                        wait_for_finalization=False,
-                        safe_staking=True,
-                        allow_partial_stake=False
-                    ),
-                    timeout=45.0
-                )
-                print(f'after buy {str(buyTrade)}')
-                if stake_result is True or stake_result.__dict__.get('success') is True:
-                    logger.info(f"Staked {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
-                    # Brains fill callback: update cost basis and cooldowns
-                    if _strategy_engine is not None:
-                        try:
-                            est_alpha = float(buyTrade['tao_amount']) / self.stats[buyTrade['netuid']]['price'] if self.stats[buyTrade['netuid']]['price'] > 0 else 0
-                            _strategy_engine.on_fill(
-                                netuid=buyTrade['netuid'], side='buy',
-                                tao_amount=float(buyTrade['tao_amount']),
-                                alpha_amount=est_alpha,
-                                price=self.stats[buyTrade['netuid']]['price'],
-                            )
-                        except Exception as e:
-                            logger.error(f'Brains on_fill error (buy): {e}')
-                else:
-                    logger.info(f"Failed to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
-            except asyncio.TimeoutError:
-                logger.error(f"Timeout staking on subnet {buyTrade['netuid']} after 45s")
-            except Exception as e:
-                print(f'ERROR staking')
-                logger.error(traceback.format_exc())
-                logger.error(f"Failed to stake on subnet {buyTrade['netuid']}: {e}")
+            await self.execute_buy_trade(buyTrade)
 
         sellTrade = self.constructSell(subnet_netuid)
         if sellTrade:
-            try:
-                logger.info(f"Attempting to unstake {float(sellTrade['alpha_amount'])} alpha from subnet {sellTrade['netuid']}")
-                unstake_result = await asyncio.wait_for(
-                    self.sub.unstake(
-                        wallet=self.wallet,
-                        hotkey_ss58=sellTrade['hotkey'] ,
-                        netuid=sellTrade['netuid'],
-                        amount=sellTrade['alpha_amount'],
-                        rate_tolerance=sellTrade['max_slippage'],
-                        wait_for_inclusion=True,
-                        wait_for_finalization=False,
-                        safe_unstaking=True,
-                        allow_partial_stake=False
-                    ),
-                    timeout=60.0
-                )
-                print(f'after sell {str(sellTrade)}')
-                if unstake_result is True:
-                    logger.info(f"Unstaked {float(sellTrade['alpha_amount'])} stake units from sn{sellTrade['netuid']} (approx. {sellTrade['approx_tao']:.4f} TAO value) at price: {self.stats[subnet_netuid]['price']}.  my threshold = {sellTrade['sell_threshold']}")
-                    # Brains fill callback: update cost basis and cooldowns
-                    if _strategy_engine is not None:
-                        try:
-                            _strategy_engine.on_fill(
-                                netuid=sellTrade['netuid'], side='sell',
-                                tao_amount=sellTrade['approx_tao'],
-                                alpha_amount=float(sellTrade['alpha_amount']),
-                                price=self.stats[subnet_netuid]['price'],
-                            )
-                        except Exception as e:
-                            logger.error(f'Brains on_fill error (sell): {e}')
-                else:
-                    logger.info(f"Failed to unstake {str(sellTrade)}  sn{subnet_netuid} ({str(unstake_result)})")
-            except asyncio.TimeoutError:
-                msg = f"Timeout unstaking from subnet {subnet_netuid} after 60s"
-                print(msg)
-                logger.error(msg)
-                self.sub = await my_async_subtensor("finney")
-            except (asyncio.exceptions.CancelledError, asyncio.exceptions.InvalidStateError) as e:
-                print(f'ERROR unstaking - {e}... continuing')
-                logger.error(traceback.format_exc())
-                logger.error(f"Failed to unstake from subnet {subnet_netuid}: {e}")
-                self.sub = await my_async_subtensor("finney")
-            except Exception as e:
-                print(f'ERROR unstaking')
-                logger.error(traceback.format_exc())
-                logger.error(f"Failed to unstake from subnet {subnet_netuid}: {e}")
-                raise
+            await self.execute_sell_trade(sellTrade)
 
 
 if __name__ == "__main__":

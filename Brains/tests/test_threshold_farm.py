@@ -4,7 +4,9 @@ import unittest
 import time
 import tempfile
 import os
+from unittest.mock import patch
 
+from Brains import config
 from Brains.models import SignalSnapshot, SubnetState
 from Brains.threshold_farm import classify_regime, compute_thresholds
 from Brains.risk import get_preset
@@ -73,6 +75,18 @@ class TestComputeThresholds(unittest.TestCase):
         self.now = time.time()
         # Set last_patch_at far enough back to pass cooldown
         self.state.last_patch_at = self.now - 3600
+        self.default_cfg = {
+            'warmup_min_hours': 0,
+            'warmup_full_hours': 0,
+            'freeze_buys_if_confidence_lt': 0.50,
+            'de_risk_only_if_confidence_lt': 0.70,
+            'trade_only_if_confidence_gte': 0.70,
+            'min_roundtrip_edge_pct': 0.02,
+            'max_threshold_shift_pct_per_tick': 0.005,
+            'max_daily_turnover_ratio': 0.15,
+            'min_minutes_between_threshold_updates': 15,
+            'min_minutes_between_trades_per_subnet': 60,
+        }
 
     def test_buy_band_below_sell_band(self):
         snap = make_snap(confidence=1.0)
@@ -117,27 +131,54 @@ class TestComputeThresholds(unittest.TestCase):
 
     def test_low_confidence_disables_buys(self):
         snap = make_snap(confidence=0.4)
-        patch = compute_thresholds(
-            snap, self.state, self.preset,
-            original_grid={'max_alpha': 2000},
-            daily_buy_tao=0, daily_sell_tao=0,
-            portfolio_value_tao=100,
-            dry_run=True, now=self.now,
-        )
-        self.assertIsNotNone(patch)
-        self.assertFalse(patch.enable_buys)
+        with patch.object(config, 'load_config', return_value=self.default_cfg):
+            patch_result = compute_thresholds(
+                snap, self.state, self.preset,
+                original_grid={'max_alpha': 2000},
+                daily_buy_tao=0, daily_sell_tao=0,
+                portfolio_value_tao=100,
+                dry_run=True, now=self.now,
+            )
+        self.assertIsNotNone(patch_result)
+        self.assertFalse(patch_result.enable_buys)
 
     def test_medium_confidence_disables_buys(self):
         snap = make_snap(confidence=0.65)
-        patch = compute_thresholds(
-            snap, self.state, self.preset,
-            original_grid={'max_alpha': 2000},
-            daily_buy_tao=0, daily_sell_tao=0,
-            portfolio_value_tao=100,
-            dry_run=True, now=self.now,
-        )
-        self.assertIsNotNone(patch)
-        self.assertFalse(patch.enable_buys)
+        with patch.object(config, 'load_config', return_value=self.default_cfg):
+            patch_result = compute_thresholds(
+                snap, self.state, self.preset,
+                original_grid={'max_alpha': 2000},
+                daily_buy_tao=0, daily_sell_tao=0,
+                portfolio_value_tao=100,
+                dry_run=True, now=self.now,
+            )
+        self.assertIsNotNone(patch_result)
+        self.assertFalse(patch_result.enable_buys)
+
+    def test_custom_confidence_gates_can_allow_buys_earlier(self):
+        snap = make_snap(confidence=0.20)
+        test_cfg = {
+            'warmup_min_hours': 0,
+            'warmup_full_hours': 0,
+            'freeze_buys_if_confidence_lt': 0.10,
+            'de_risk_only_if_confidence_lt': 0.15,
+            'trade_only_if_confidence_gte': 0.70,
+            'min_roundtrip_edge_pct': 0.02,
+            'max_threshold_shift_pct_per_tick': 0.005,
+            'max_daily_turnover_ratio': 0.15,
+            'min_minutes_between_threshold_updates': 15,
+            'min_minutes_between_trades_per_subnet': 60,
+        }
+        with patch.object(config, 'load_config', return_value=test_cfg):
+            patch_result = compute_thresholds(
+                snap, self.state, self.preset,
+                original_grid={'max_alpha': 2000},
+                daily_buy_tao=0, daily_sell_tao=0,
+                portfolio_value_tao=100,
+                dry_run=True, now=self.now,
+            )
+        self.assertIsNotNone(patch_result)
+        self.assertTrue(patch_result.enable_buys)
 
     def test_cooldown_blocks_update(self):
         """If last patch was too recent, returns None."""
@@ -181,6 +222,26 @@ class TestComputeThresholds(unittest.TestCase):
         self.assertGreater(patch.sell_upper, 0)
         # Buy band should be below sell band
         self.assertLess(patch.buy_upper, patch.sell_lower)
+
+    def test_zero_warmup_config_does_not_block_or_crash(self):
+        snap = make_snap(confidence=0.2)
+        test_cfg = {
+            'warmup_min_hours': 0,
+            'warmup_full_hours': 0,
+            'trade_only_if_confidence_gte': 0.70,
+            'min_roundtrip_edge_pct': 0.02,
+            'max_threshold_shift_pct_per_tick': 0.005,
+            'max_daily_turnover_ratio': 0.15,
+        }
+        with patch.object(config, 'load_config', return_value=test_cfg):
+            patch_result = compute_thresholds(
+                snap, self.state, self.preset,
+                original_grid={'max_alpha': 2000},
+                daily_buy_tao=0, daily_sell_tao=0,
+                portfolio_value_tao=100,
+                dry_run=True, now=self.now,
+            )
+        self.assertIsNotNone(patch_result)
 
 
 if __name__ == '__main__':

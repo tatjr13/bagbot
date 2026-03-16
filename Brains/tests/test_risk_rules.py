@@ -4,7 +4,9 @@ import unittest
 import time
 import tempfile
 import os
+from unittest.mock import patch
 
+from Brains import config
 from Brains.risk import (
     get_preset, dynamic_min_edge, apply_regime_adjustments,
     clamp_threshold_shift, check_daily_turnover,
@@ -182,11 +184,13 @@ class TestSubnetUniverseFilter(unittest.TestCase):
         self.assertIn('allowlist', reason)
 
     def test_fails_insufficient_history(self):
-        ok, reason = passes_subnet_universe_filter(
-            netuid=11, tao_in_pool=5000.0,
-            history_hours=12, max_buy_tao=0.1,
-            allowed_netuids={11},
-        )
+        test_cfg = {'min_liquidity_tao': 150, 'warmup_min_hours': 24, 'new_subnet_min_age_days': 7}
+        with patch.object(config, 'load_config', return_value=test_cfg):
+            ok, reason = passes_subnet_universe_filter(
+                netuid=11, tao_in_pool=5000.0,
+                history_hours=12, max_buy_tao=0.1,
+                allowed_netuids={11},
+            )
         self.assertFalse(ok)
         self.assertIn('warmup', reason)
 

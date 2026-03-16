@@ -9,19 +9,24 @@ logger = logging.getLogger(__name__)
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config', 'threshold_farm.yaml')
 
 _cached_config = None
+_cached_mtime_ns = None
 
 
 def load_config(path=None):
     """Load and return the threshold_farm config as a dict."""
-    global _cached_config
-    if _cached_config is not None and path is None:
-        return _cached_config
+    global _cached_config, _cached_mtime_ns
 
     path = path or _CONFIG_PATH
     try:
+        current_mtime_ns = os.stat(path).st_mtime_ns
+        if path == _CONFIG_PATH and _cached_config is not None and _cached_mtime_ns == current_mtime_ns:
+            return _cached_config
+
         with open(path, 'r') as f:
             cfg = yaml.safe_load(f)
-        _cached_config = cfg
+        if path == _CONFIG_PATH:
+            _cached_config = cfg
+            _cached_mtime_ns = current_mtime_ns
         return cfg
     except FileNotFoundError:
         logger.error(f'Config file not found: {path}')
@@ -33,8 +38,9 @@ def load_config(path=None):
 
 def reload_config():
     """Force reload config from disk."""
-    global _cached_config
+    global _cached_config, _cached_mtime_ns
     _cached_config = None
+    _cached_mtime_ns = None
     return load_config()
 
 

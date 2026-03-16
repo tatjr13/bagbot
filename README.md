@@ -6,6 +6,9 @@ A bot for accumulating alpha in the Bittensor Alpha Group.
 > [!CAUTION]
 **HIGHLY RECOMMENDED TO JOIN THE [BITTENSOR ALPHA GROUP](https://taotemplar.com/bag) FOR HELP WITH USE AND STRATEGY**
 
+> [!NOTE]
+> See [TARGON_SETUP_NOTES.md](TARGON_SETUP_NOTES.md) for the current Targon runtime layout, important bot files, PM2 process names, and live deployment notes.
+
 ## Setup Instructions
 
 Follow these steps to set up and run Bagbot:

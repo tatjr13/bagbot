@@ -30,15 +30,12 @@ class StrategyEngine:
         self.state_store = StrategyStateStore()
         self.telegram = None  # set externally if telegram enabled
         self.patches: Dict[int, ThresholdPatch] = {}
-        self.dry_run = getattr(bagbot_settings, 'BRAINS_DRY_RUN', True)
         self.risk_mode = self.cfg.get('risk_mode_default', 'conservative')
-
-        # Tradable subnet allowlist: only subnets in SUBNET_SETTINGS are tradable
-        self.tradable_netuids: Set[int] = set(
-            getattr(bagbot_settings, 'SUBNET_SETTINGS', {}).keys()
-        )
         self.max_live = self.cfg.get('max_live_subnets', 3)
         self.bar_minutes = self.cfg.get('bar_size_minutes', 15)
+        self.dry_run = True
+        self.tradable_netuids: Set[int] = set()
+        self.refresh_runtime_settings(bagbot_settings)
 
         # Telegram notifications via stub logger (Arbos handles actual Telegram UI)
         from Brains.telegram_cmds import setup_telegram
@@ -50,12 +47,61 @@ class StrategyEngine:
             f'telegram={"ON" if self.telegram else "OFF"}'
         )
 
+    def refresh_strategy_config(self):
+        """Refresh Brains YAML config that may change during runtime."""
+        latest_cfg = config.load_config()
+        latest_risk_mode = latest_cfg.get('risk_mode_default', 'conservative')
+        latest_max_live = latest_cfg.get('max_live_subnets', 3)
+        latest_bar_minutes = latest_cfg.get('bar_size_minutes', 15)
+
+        if (
+            latest_risk_mode != self.risk_mode or
+            latest_max_live != self.max_live or
+            latest_bar_minutes != self.bar_minutes
+        ):
+            logger.info(
+                'Brains strategy config refreshed: '
+                f'risk={latest_risk_mode}, max_live={latest_max_live}, '
+                f'bar_minutes={latest_bar_minutes}'
+            )
+
+        self.cfg = latest_cfg
+        self.risk_mode = latest_risk_mode
+        self.max_live = latest_max_live
+        self.bar_minutes = latest_bar_minutes
+
+    def refresh_runtime_settings(self, bagbot_settings):
+        """Refresh settings-derived runtime state without losing bar history."""
+        new_dry_run = getattr(bagbot_settings, 'BRAINS_DRY_RUN', True)
+        new_tradable_netuids: Set[int] = set(
+            getattr(bagbot_settings, 'SUBNET_SETTINGS', {}).keys()
+        )
+
+        removed_netuids = set(self.patches.keys()) - new_tradable_netuids
+        for netuid in removed_netuids:
+            self.patches.pop(netuid, None)
+
+        settings_changed = (
+            new_dry_run != self.dry_run or
+            new_tradable_netuids != self.tradable_netuids
+        )
+
+        self.dry_run = new_dry_run
+        self.tradable_netuids = new_tradable_netuids
+
+        if settings_changed or removed_netuids:
+            logger.info(
+                'Brains runtime settings refreshed: '
+                f'dry_run={self.dry_run}, tradable_netuids={sorted(self.tradable_netuids)}'
+            )
+
     def on_tick(self, stats: Dict, subnet_grids: Dict, stake_info: Dict, balance: float):
         """Called each bot tick after refresh_stats().
 
         Records price bars for all observed subnets, computes strategy
         patches only for tradable subnets that pass universe filters.
         """
+        self.refresh_strategy_config()
         now = time.time()
         preset = get_preset(self.risk_mode)
 

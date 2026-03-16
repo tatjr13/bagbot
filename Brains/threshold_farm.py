@@ -126,6 +126,9 @@ def compute_thresholds(
     warmup_min_h = cfg.get('warmup_min_hours', 24)
     warmup_full_h = cfg.get('warmup_full_hours', 72)
     min_confidence = cfg.get('trade_only_if_confidence_gte', 0.70)
+    freeze_buys_confidence = cfg.get('freeze_buys_if_confidence_lt', 0.50)
+    derisk_only_confidence = cfg.get('de_risk_only_if_confidence_lt', min_confidence)
+    derisk_only_confidence = max(derisk_only_confidence, freeze_buys_confidence)
 
     # Check threshold update cooldown
     can_update, can_trade = check_cooldowns(state, now)
@@ -133,9 +136,12 @@ def compute_thresholds(
         return None
 
     # Warmup gate: no adaptive thresholds until warmup_min_hours
-    history_hours = (now - (state.last_patch_at or 0)) if state.last_patch_at else 0
-    # We use confidence as proxy for history availability
-    if snap.confidence < (warmup_min_h / warmup_full_h) * 0.5:
+    warmup_ratio_gate = 0.0
+    if warmup_min_h > 0 and warmup_full_h > 0:
+        warmup_ratio_gate = (warmup_min_h / warmup_full_h) * 0.5
+
+    # We use confidence as a proxy for history availability.
+    if snap.confidence < warmup_ratio_gate:
         # Very early: not enough data, keep static thresholds
         logger.info(f'Brains sn{snap.netuid}: insufficient warmup '
                     f'(confidence={snap.confidence:.2f}), keeping static thresholds')
@@ -157,6 +163,8 @@ def compute_thresholds(
         snap.volatility_24h / max(0.01, signals.volatility([snap.ema_72h] * 2)),  # vol_mult approx
         snap.est_slippage_pct,
         snap.confidence,
+        freeze_buys_if_confidence_lt=freeze_buys_confidence,
+        de_risk_only_if_confidence_lt=derisk_only_confidence,
     )
 
     # Compute dynamic edge
@@ -205,8 +213,8 @@ def compute_thresholds(
         enable_buys = False
         enable_sells = False
 
-    # Confidence < 0.5: disable buys, freeze prior thresholds
-    if snap.confidence < 0.5:
+    # Very low confidence: disable buys and freeze prior thresholds.
+    if snap.confidence < freeze_buys_confidence:
         enable_buys = False
         if state.last_buy_lower is not None:
             buy_lower = state.last_buy_lower
@@ -215,8 +223,8 @@ def compute_thresholds(
             sell_lower = state.last_sell_lower
             sell_upper = state.last_sell_upper
 
-    # Confidence < 0.7: only allow de-risking (no widening of buy zone)
-    elif snap.confidence < min_confidence:
+    # Moderate confidence: only allow de-risking (no widening of buy zone)
+    elif snap.confidence < derisk_only_confidence:
         enable_buys = False
 
     # Clamp threshold shifts
@@ -230,7 +238,7 @@ def compute_thresholds(
     reasons = [f'regime={regime}']
     if not enable_buys:
         reasons.append('buys_disabled')
-    if snap.confidence < min_confidence:
+    if snap.confidence < derisk_only_confidence:
         reasons.append(f'low_conf={snap.confidence:.2f}')
     if snap.inventory_ratio > 0.8:
         reasons.append(f'high_inv={snap.inventory_ratio:.0%}')
