@@ -1,0 +1,39 @@
+enabled: true
+dry_run: true
+
+risk_mode_default: conservative
+bar_size_minutes: 15
+rebalance_every_minutes: 15
+
+# Warmup gates - no adaptive thresholds until enough history
+warmup_min_hours: 24
+warmup_full_hours: 72
+trade_only_if_confidence_gte: 0.70
+
+# Edge and slippage
+min_roundtrip_edge_pct: 0.02
+slippage_limit_pct: 0.005
+max_threshold_shift_pct_per_tick: 0.005
+max_daily_turnover_ratio: 0.15
+
+# Timing
+min_minutes_between_threshold_updates: 15
+min_minutes_between_trades_per_subnet: 60
+
+# Pump protection
+disable_buys_above_range_pos: 0.85
+disable_buys_if_6h_pump_pct: 0.06
+
+# Subnet universe filters
+max_live_subnets: 3
+new_subnet_min_age_days: 7
+min_liquidity_tao: 150
+
+# Lookback windows
+lookbacks:
+  ema_hours: 72
+  vol_hours: 24
+  range_short_hours: 24
+  range_medium_hours: 72
+  momentum_short_hours: 6
+  momentum_medium_hours: 24

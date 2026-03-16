@@ -96,6 +96,17 @@ def load_safe_python_settings():
 
 bagbot_settings = load_safe_python_settings()
 
+# Brains strategy engine (optional, enabled via BRAINS_ENABLED in settings)
+_strategy_engine = None
+if getattr(bagbot_settings, 'BRAINS_ENABLED', False):
+    try:
+        from Brains.integration import StrategyEngine
+        _strategy_engine = StrategyEngine(bagbot_settings)
+        logger.info('Brains strategy engine initialized')
+    except Exception as e:
+        logger.error(f'Failed to initialize Brains: {e}')
+        _strategy_engine = None
+
 def parseArgs():
     parser = argparse.ArgumentParser(description="A basic bittensor alpha bot")
     parser.add_argument( "--nocheck", action="store_true", help="Don't check settings before starting the bot (boolean flag)"
@@ -301,7 +312,8 @@ class BittensorUtility():
 
     def sendNotification(self, msg):
         logger.info(msg)
-        #TODO Add Alerting code below:
+        if _strategy_engine and _strategy_engine.telegram:
+            _strategy_engine.telegram.send_async(msg)
 
 
     async def get_subnet_stats(self) -> Tuple[Dict[int, Dict], Dict[int, int]]:
@@ -419,6 +431,16 @@ class BittensorUtility():
                     logger.info(f'Using configured validators for stake queries: {all_validators}')
 
                 await self.refresh_stats(all_validators)
+
+                # Brains strategy tick: record bars, compute patches
+                if _strategy_engine is not None:
+                    try:
+                        _strategy_engine.on_tick(
+                            self.stats, self.subnet_grids,
+                            self.current_stake_info, self.balance
+                        )
+                    except Exception as e:
+                        logger.error(f'Brains on_tick error: {e}')
 
                 logger.info(f'Tick {self.tick}: Printing table')
                 printHelpers.print_table_rich(self, console, self.current_stake_info, list(bagbot_settings.SUBNET_SETTINGS.keys()), self.stats, self.balance, self.subnet_grids)
@@ -584,6 +606,12 @@ class BittensorUtility():
 
 
     def constructBuy(self, subnet_netuid):
+        # Brains guard: check if buys are disabled by strategy
+        if _strategy_engine is not None:
+            patch = _strategy_engine.get_patch(subnet_netuid)
+            if patch is not None and not patch.dry_run and not patch.enable_buys:
+                return None
+
         current_stake_amt = self.my_current_stake(subnet_netuid)
         buy_threshold = self.get_subnet_buy_threshold(subnet_netuid)
 
@@ -591,6 +619,17 @@ class BittensorUtility():
         max_tao_per_buy = self.get_subnet_setting(subnet_netuid, 'max_tao_per_buy', bagbot_settings.MAX_TAO_PER_BUY)
         max_slippage = self.get_subnet_setting(subnet_netuid, 'max_slippage_percent_per_buy', bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)
         hotkey = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
+
+        # Brains threshold overlay: use strategy thresholds if live
+        if _strategy_engine is not None:
+            patch = _strategy_engine.get_patch(subnet_netuid)
+            if patch is not None and not patch.dry_run:
+                # Override the grid thresholds with strategy values
+                self.subnet_grids[subnet_netuid]['buy_lower'] = patch.buy_lower
+                self.subnet_grids[subnet_netuid]['buy_upper'] = patch.buy_upper
+                buy_threshold = self.get_subnet_buy_threshold(subnet_netuid)
+                # Enforce strategy size cap (take the minimum)
+                max_tao_per_buy = min(max_tao_per_buy, patch.max_tao_per_buy)
 
         if self.balance > max_tao_per_buy:
 
@@ -617,12 +656,27 @@ class BittensorUtility():
         return None
 
     def constructSell(self, subnet_netuid):
+        # Brains guard: check if sells are disabled by strategy
+        if _strategy_engine is not None:
+            patch = _strategy_engine.get_patch(subnet_netuid)
+            if patch is not None and not patch.dry_run and not patch.enable_sells:
+                return None
+
         current_stake_amt = self.my_current_stake(subnet_netuid)
         sell_threshold = self.get_subnet_sell_threshold(subnet_netuid)
 
         # Get subnet-specific settings or fall back to global defaults
         max_tao_per_sell = self.get_subnet_setting(subnet_netuid, 'max_tao_per_sell', bagbot_settings.MAX_TAO_PER_SELL)
         max_slippage = self.get_subnet_setting(subnet_netuid, 'max_slippage_percent_per_buy', bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY)
+
+        # Brains threshold overlay: use strategy thresholds if live
+        if _strategy_engine is not None:
+            patch = _strategy_engine.get_patch(subnet_netuid)
+            if patch is not None and not patch.dry_run:
+                self.subnet_grids[subnet_netuid]['sell_lower'] = patch.sell_lower
+                self.subnet_grids[subnet_netuid]['sell_upper'] = patch.sell_upper
+                sell_threshold = self.get_subnet_sell_threshold(subnet_netuid)
+                max_tao_per_sell = min(max_tao_per_sell, patch.max_tao_per_sell)
 
         if subnet_netuid in self.stats and \
             self.stats[subnet_netuid]['price'] > sell_threshold and \
@@ -683,6 +737,18 @@ class BittensorUtility():
                 print(f'after buy {str(buyTrade)}')
                 if stake_result is True or stake_result.__dict__.get('success') is True:
                     logger.info(f"Staked {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
+                    # Brains fill callback: update cost basis and cooldowns
+                    if _strategy_engine is not None:
+                        try:
+                            est_alpha = float(buyTrade['tao_amount']) / self.stats[buyTrade['netuid']]['price'] if self.stats[buyTrade['netuid']]['price'] > 0 else 0
+                            _strategy_engine.on_fill(
+                                netuid=buyTrade['netuid'], side='buy',
+                                tao_amount=float(buyTrade['tao_amount']),
+                                alpha_amount=est_alpha,
+                                price=self.stats[buyTrade['netuid']]['price'],
+                            )
+                        except Exception as e:
+                            logger.error(f'Brains on_fill error (buy): {e}')
                 else:
                     logger.info(f"Failed to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
             except asyncio.TimeoutError:
@@ -713,6 +779,17 @@ class BittensorUtility():
                 print(f'after sell {str(sellTrade)}')
                 if unstake_result is True:
                     logger.info(f"Unstaked {float(sellTrade['alpha_amount'])} stake units from sn{sellTrade['netuid']} (approx. {sellTrade['approx_tao']:.4f} TAO value) at price: {self.stats[subnet_netuid]['price']}.  my threshold = {sellTrade['sell_threshold']}")
+                    # Brains fill callback: update cost basis and cooldowns
+                    if _strategy_engine is not None:
+                        try:
+                            _strategy_engine.on_fill(
+                                netuid=sellTrade['netuid'], side='sell',
+                                tao_amount=sellTrade['approx_tao'],
+                                alpha_amount=float(sellTrade['alpha_amount']),
+                                price=self.stats[subnet_netuid]['price'],
+                            )
+                        except Exception as e:
+                            logger.error(f'Brains on_fill error (sell): {e}')
                 else:
                     logger.info(f"Failed to unstake {str(sellTrade)}  sn{subnet_netuid} ({str(unstake_result)})")
             except asyncio.TimeoutError:

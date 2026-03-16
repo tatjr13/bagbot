@@ -47,3 +47,6 @@ Thumbs.db
 .wallet_pw
 settings_overrides.py
 bagbot_settings_overrides.py
+*.env
+Brains/price_history.db
+Brains/state/

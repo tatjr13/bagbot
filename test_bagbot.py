@@ -15,7 +15,12 @@ class MockExchange(Exchange):
 class TestBAGBot(unittest.TestCase):
 
     def setUp(self):
-        pass
+        # Pin globals to known defaults so tests pass regardless of overrides file
+        bagbot.bagbot_settings.MAX_TAO_PER_BUY = 0.02
+        bagbot.bagbot_settings.MAX_TAO_PER_SELL = 0.02
+        bagbot.bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY = 0.2
+        bagbot.bagbot_settings.BUY_ZONE_POWER = 1.0
+        bagbot.bagbot_settings.SELL_ZONE_POWER = 1.0
 
     def testNoSellPriceException(self):
         args = {}

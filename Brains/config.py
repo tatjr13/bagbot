@@ -1,0 +1,51 @@
+"""YAML config loader for Brains strategy plugin."""
+
+import os
+import yaml
+import logging
+
+logger = logging.getLogger(__name__)
+
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config', 'threshold_farm.yaml')
+
+_cached_config = None
+
+
+def load_config(path=None):
+    """Load and return the threshold_farm config as a dict."""
+    global _cached_config
+    if _cached_config is not None and path is None:
+        return _cached_config
+
+    path = path or _CONFIG_PATH
+    try:
+        with open(path, 'r') as f:
+            cfg = yaml.safe_load(f)
+        _cached_config = cfg
+        return cfg
+    except FileNotFoundError:
+        logger.error(f'Config file not found: {path}')
+        raise
+    except yaml.YAMLError as e:
+        logger.error(f'Invalid YAML in config: {e}')
+        raise
+
+
+def reload_config():
+    """Force reload config from disk."""
+    global _cached_config
+    _cached_config = None
+    return load_config()
+
+
+def get(key, default=None):
+    """Get a top-level config value."""
+    cfg = load_config()
+    return cfg.get(key, default)
+
+
+def get_lookback(key, default=None):
+    """Get a lookback window config value."""
+    cfg = load_config()
+    lookbacks = cfg.get('lookbacks', {})
+    return lookbacks.get(key, default)
