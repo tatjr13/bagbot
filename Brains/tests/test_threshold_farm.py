@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from Brains import config
 from Brains.models import SignalSnapshot, SubnetState
-from Brains.threshold_farm import classify_regime, compute_thresholds
+from Brains.state import PriceBarStore
+from Brains.threshold_farm import classify_regime, compute_signals, compute_thresholds
 from Brains.risk import get_preset
 
 
@@ -242,6 +243,74 @@ class TestComputeThresholds(unittest.TestCase):
                 dry_run=True, now=self.now,
             )
         self.assertIsNotNone(patch_result)
+
+    def test_warmup_gate_requires_full_configured_ratio(self):
+        snap = make_snap(confidence=0.20)
+        test_cfg = {
+            'warmup_min_hours': 24,
+            'warmup_full_hours': 72,
+            'freeze_buys_if_confidence_lt': 0.0,
+            'de_risk_only_if_confidence_lt': 0.0,
+            'trade_only_if_confidence_gte': 0.0,
+            'min_roundtrip_edge_pct': 0.02,
+            'max_threshold_shift_pct_per_tick': 0.005,
+            'max_daily_turnover_ratio': 0.15,
+            'min_minutes_between_threshold_updates': 15,
+            'min_minutes_between_trades_per_subnet': 60,
+        }
+        patch_result = compute_thresholds(
+            snap, self.state, self.preset,
+            original_grid={'max_alpha': 2000},
+            daily_buy_tao=0, daily_sell_tao=0,
+            portfolio_value_tao=100,
+            dry_run=True, now=self.now,
+            cfg=test_cfg,
+        )
+        self.assertIsNone(patch_result)
+
+
+class TestComputeSignals(unittest.TestCase):
+
+    def test_momentum_fetches_one_extra_bar(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, 'bars.sqlite')
+            bar_store = PriceBarStore(db_path)
+            try:
+                now = time.time()
+                prices = [1.0 + (idx * 0.01) for idx in range(25)]
+                for idx, price in enumerate(prices):
+                    timestamp = now - (((len(prices) - 1) - idx) * 900)
+                    bar_store.record_tick(
+                        11, price, 5000.0, 5000.0,
+                        timestamp=timestamp, bar_minutes=15,
+                    )
+                test_cfg = {
+                    'bar_size_minutes': 15,
+                    'lookbacks': {
+                        'ema_hours': 72,
+                        'vol_hours': 24,
+                        'range_short_hours': 24,
+                        'range_medium_hours': 72,
+                        'momentum_short_hours': 6,
+                    },
+                }
+                snap = compute_signals(
+                    netuid=11,
+                    spot_price=prices[-1],
+                    tao_in=5000.0,
+                    alpha_in=5000.0,
+                    current_alpha=0.0,
+                    max_alpha=100.0,
+                    max_buy_tao=1.0,
+                    bar_store=bar_store,
+                    now=now,
+                    cfg=test_cfg,
+                )
+            finally:
+                bar_store.close()
+
+        expected_momentum = (prices[-1] - prices[0]) / prices[0]
+        self.assertAlmostEqual(snap.momentum_6h, expected_momentum)
 
 
 if __name__ == '__main__':

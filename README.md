@@ -86,3 +86,18 @@ To start the bot, activate the virtual environment and run the script:
 source ~/.bagbotvirtualenv/bin/activate
 python3 bagbot.py
 ```
+
+## Offline Research
+
+Bagbot now ships with an offline replay harness for Brains config experiments. It replays recorded subnet bars from `Brains/price_history.db`, applies the live `StrategyEngine`, and scores candidate YAML configs on net TAO, drawdown, and turnover.
+
+Example:
+
+```bash
+python3 Brains/research_harness.py \
+  --hours 168 \
+  --config Brains/config/threshold_farm.yaml \
+  --config /tmp/candidate.yaml
+```
+
+Use this before promoting nontrivial `threshold_farm.yaml` changes into a live Targon runtime.

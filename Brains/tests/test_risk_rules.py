@@ -209,6 +209,17 @@ class TestSubnetUniverseFilter(unittest.TestCase):
         )
         self.assertTrue(ok)
 
+    def test_fails_when_true_subnet_age_is_below_minimum(self):
+        test_cfg = {'min_liquidity_tao': 150, 'warmup_min_hours': 0, 'new_subnet_min_age_days': 7}
+        ok, reason = passes_subnet_universe_filter(
+            netuid=11, tao_in_pool=5000.0,
+            history_hours=72, max_buy_tao=0.1,
+            subnet_age_days=3.0,
+            cfg=test_cfg,
+        )
+        self.assertFalse(ok)
+        self.assertIn('age', reason)
+
 
 class TestRiskPresets(unittest.TestCase):
 

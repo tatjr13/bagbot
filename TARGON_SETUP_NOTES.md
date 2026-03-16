@@ -24,6 +24,7 @@ This file captures the current live Bagbot/Arbos operating model and the Targon 
 - Brains risk logic: `Brains/risk.py`
 - Brains integration layer: `Brains/integration.py`
 - Taostats helper: `Brains/taostats_api.py`
+- Offline replay harness: `Brains/research_harness.py`
 - Targon deploy helper for Arbos: `Brains/arbos/deploy.sh`
 
 ## Live Trading Behavior
@@ -91,4 +92,6 @@ tail -n 100 /data/bagbot/staking.log
 - Keep secrets in local `.env` files or remote-only runtime files, not in Git
 - Keep `/data/bagbot/bagbot_settings_overrides.py` and any password files at `600`
 - Treat Taostats as read-only research input
+- Prefer the local replay harness and SQLite state before spending additional Chutes calls; once the account rolls into pay-as-you-go, local evaluation is the cheapest first pass
+- Current Arbos Chutes routing is a frontier pool centered on `openai/gpt-oss-120b-TEE` with `MiniMax-M2.5-TEE`, `DeepSeek-V3.1-TEE`, and `Kimi-K2.5-TEE` as explicit fallbacks
 - Do not add any workflow that transfers funds or uses a second wallet without explicit operator approval

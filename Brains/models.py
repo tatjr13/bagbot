@@ -28,6 +28,7 @@ class SignalSnapshot:
     tao_flow_tao: float = 0.0
     ema_tao_flow_tao: float = 0.0
     fee_rate: float = 0.0
+    subnet_age_days: Optional[float] = None
 
 
 @dataclass

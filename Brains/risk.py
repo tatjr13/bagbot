@@ -197,13 +197,15 @@ def passes_subnet_universe_filter(
     history_hours: float,
     max_buy_tao: float,
     allowed_netuids: set = None,
+    subnet_age_days: Optional[float] = None,
+    cfg: dict = None,
 ) -> Tuple[bool, str]:
     """Check if a subnet passes the tradable universe filters.
 
     Returns:
         (passes, reason)
     """
-    cfg = config.load_config()
+    cfg = cfg or config.load_config()
     min_liquidity = cfg.get('min_liquidity_tao', 150)
     min_age_days = cfg.get('new_subnet_min_age_days', 7)
     warmup_min_hours = cfg.get('warmup_min_hours', 24)
@@ -223,6 +225,10 @@ def passes_subnet_universe_filter(
     # Need minimum history
     if history_hours < warmup_min_hours:
         return (False, f'sn{netuid} only {history_hours:.1f}h history < {warmup_min_hours}h warmup')
+
+    # Optional true subnet age guard for newly launched subnets.
+    if subnet_age_days is not None and subnet_age_days < min_age_days:
+        return (False, f'sn{netuid} age {subnet_age_days:.1f}d < {min_age_days}d minimum')
 
     # Simulated slippage check
     if tao_in_pool > 0:

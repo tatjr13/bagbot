@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import time
+from datetime import datetime, timezone
 from dataclasses import replace
 from typing import Dict, List, Optional, Set
 
@@ -29,6 +30,20 @@ def _rao_to_tao(value) -> float:
     return _float_or_zero(value) / RAO_PER_TAO
 
 
+def _age_days_from_timestamp(value, now: float) -> Optional[float]:
+    if value in (None, ''):
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            ts = float(value)
+        else:
+            normalized = str(value).strip().replace('Z', '+00:00')
+            ts = datetime.fromisoformat(normalized).astimezone(timezone.utc).timestamp()
+        return max(0.0, (now - ts) / 86400.0)
+    except (TypeError, ValueError):
+        return None
+
+
 class TaoStatsFlowCache:
     """Cached Taostats subnet flow snapshot used for roster ranking."""
 
@@ -47,8 +62,19 @@ class TaoStatsFlowCache:
         self.enabled = bool(cfg.get('taostats_flow_enabled', True)) and bool(
             os.environ.get('TAOSTATS_API_KEY', '').strip()
         )
+        if not self.enabled:
+            self.by_netuid = {}
+            self.last_refresh_at = 0.0
 
     def get(self, netuid: int) -> Optional[Dict[str, float]]:
+        if not self.enabled:
+            return None
+        if not self.by_netuid:
+            return None
+        if self.last_refresh_at <= 0:
+            return None
+        if (time.time() - self.last_refresh_at) >= self.refresh_seconds:
+            return None
         return self.by_netuid.get(netuid)
 
     def maybe_refresh(self, force: bool = False) -> None:
@@ -72,6 +98,7 @@ class TaoStatsFlowCache:
                 netuid = int(row.get('netuid', -1))
                 if netuid < 0:
                     continue
+                subnet_age_days = _age_days_from_timestamp(row.get('registration_timestamp'), now)
                 next_by_netuid[netuid] = {
                     'net_flow_1d_tao': _rao_to_tao(row.get('net_flow_1_day')),
                     'net_flow_7d_tao': _rao_to_tao(row.get('net_flow_7_days')),
@@ -79,6 +106,7 @@ class TaoStatsFlowCache:
                     'tao_flow_tao': _rao_to_tao(row.get('tao_flow')),
                     'ema_tao_flow_tao': _rao_to_tao(row.get('ema_tao_flow')),
                     'fee_rate': _float_or_zero(row.get('fee_rate')),
+                    'subnet_age_days': subnet_age_days,
                 }
 
             if next_by_netuid:
@@ -338,12 +366,15 @@ class StrategyEngine:
                     current_alpha += float(stake_obj.stake)
 
             max_buy_tao = grid.get('max_tao_per_buy', preset.max_buy_tao)
+            flow_snapshot = self.taostats_flow_cache.get(netuid)
 
             # Universe filter
             history_h = self.bar_store.get_history_hours(netuid, now)
             passes, reason = passes_subnet_universe_filter(
                 netuid, sdata.get('tao_in', 0), history_h, max_buy_tao,
                 allowed_netuids=None,
+                subnet_age_days=flow_snapshot.get('subnet_age_days') if flow_snapshot else None,
+                cfg=self.cfg,
             )
             if not passes:
                 logger.debug(f'Brains sn{netuid}: skipped - {reason}')
@@ -360,8 +391,8 @@ class StrategyEngine:
                 max_buy_tao=max_buy_tao,
                 bar_store=self.bar_store,
                 now=now,
+                cfg=self.cfg,
             )
-            flow_snapshot = self.taostats_flow_cache.get(netuid)
             if flow_snapshot is not None:
                 snap = replace(snap, **flow_snapshot)
 
@@ -381,6 +412,7 @@ class StrategyEngine:
                 portfolio_value_tao=portfolio_value,
                 dry_run=self.dry_run,
                 now=now,
+                cfg=self.cfg,
             )
 
             patch = fresh_patch or self.patches.get(netuid)

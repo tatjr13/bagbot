@@ -117,6 +117,36 @@ class PriceBarStore:
         bars = self.get_bars(netuid, hours, now)
         return [b[4] for b in bars]  # index 4 = close
 
+    def list_netuids(self) -> List[int]:
+        """Return all netuids present in the price history store."""
+        rows = self._conn.execute(
+            'SELECT DISTINCT netuid FROM price_bars ORDER BY netuid ASC'
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def get_bars_between(
+        self,
+        start_time: float,
+        end_time: float,
+        netuids: Optional[List[int]] = None,
+    ) -> List[Tuple]:
+        """Get raw bars across a time range for one or more subnets.
+
+        Returns list of
+        (bar_time, netuid, open, high, low, close, tao_in, alpha_in, tick_count).
+        """
+        params: List[object] = [int(start_time), int(end_time)]
+        query = (
+            'SELECT bar_time, netuid, open, high, low, close, tao_in, alpha_in, tick_count '
+            'FROM price_bars WHERE bar_time >= ? AND bar_time <= ?'
+        )
+        if netuids:
+            placeholders = ','.join('?' for _ in netuids)
+            query += f' AND netuid IN ({placeholders})'
+            params.extend(int(netuid) for netuid in netuids)
+        query += ' ORDER BY bar_time ASC, netuid ASC'
+        return self._conn.execute(query, tuple(params)).fetchall()
+
     def get_bar_count(self, netuid: int, hours: float = None, now: float = None) -> int:
         """Count available bars for a subnet."""
         now = now or time.time()
@@ -137,6 +167,17 @@ class PriceBarStore:
         row = self._conn.execute(
             'SELECT MIN(bar_time) FROM price_bars WHERE netuid = ?', (netuid,)
         ).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def get_latest_bar_time(self, netuid: Optional[int] = None) -> Optional[float]:
+        """Get the latest recorded bar timestamp."""
+        if netuid is None:
+            row = self._conn.execute('SELECT MAX(bar_time) FROM price_bars').fetchone()
+        else:
+            row = self._conn.execute(
+                'SELECT MAX(bar_time) FROM price_bars WHERE netuid = ?',
+                (netuid,),
+            ).fetchone()
         return row[0] if row and row[0] is not None else None
 
     def get_history_hours(self, netuid: int, now: float = None) -> float:

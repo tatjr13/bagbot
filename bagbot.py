@@ -191,6 +191,7 @@ class BittensorUtility():
         self.settings_signature = None
         self.static_subnet_grids = {}
         self.subnet_grids = {}
+        self.last_runtime_subnet_grids = {}
         self.execution_blocked_subnets = {}
 
 
@@ -324,13 +325,17 @@ class BittensorUtility():
         if self.gridLoaded and current_signature == self.settings_signature:
             return
 
+        previous_runtime_grids = {
+            netuid: dict(config)
+            for netuid, config in self.subnet_grids.items()
+        }
         bagbot_settings = load_safe_python_settings()
         self.settings_signature = current_signature
         self.static_subnet_grids = {
             netuid: dict(config)
             for netuid, config in getattr(bagbot_settings, 'SUBNET_SETTINGS', {}).items()
         }
-        self.subnet_grids = dict(self.static_subnet_grids)
+        self.subnet_grids = dict(self.static_subnet_grids) or previous_runtime_grids
         self.validateGrid()
         self.gridLoaded = True
 
@@ -341,6 +346,47 @@ class BittensorUtility():
                 logger.error(f'Brains settings refresh error: {e}')
 
         logger.info(f'Loaded subnet settings for netuids: {sorted(self.static_subnet_grids.keys())}')
+
+    def _current_alpha_for_netuid(self, netuid):
+        total_alpha = 0.0
+        for hotkey_stakes in self.current_stake_info.values():
+            stake_obj = hotkey_stakes.get(netuid)
+            if stake_obj:
+                total_alpha += float(stake_obj.stake)
+        return total_alpha
+
+    def _build_emergency_grid(self, subnet_stats, current_alpha=0.0):
+        spot_price = max(float(subnet_stats.get('price', 0.0) or 0.0), 1e-9)
+        default_position_tao = 25.0
+        max_alpha = max(1.0, current_alpha * 1.25, default_position_tao / spot_price)
+        return {
+            'buy_lower': spot_price * 0.955,
+            'buy_upper': spot_price * 0.985,
+            'sell_lower': spot_price * 1.020,
+            'sell_upper': spot_price * 1.060,
+            'max_alpha': max_alpha,
+        }
+
+    def build_fallback_subnet_grids(self):
+        """Preserve a manageable roster if Brains or static config is unavailable."""
+        fallback_grids = {
+            netuid: dict(config)
+            for netuid, config in self.last_runtime_subnet_grids.items()
+        }
+
+        for netuid, config in self.static_subnet_grids.items():
+            fallback_grids[netuid] = dict(config)
+
+        for netuid, subnet_stats in getattr(self, 'stats', {}).items():
+            current_alpha = self._current_alpha_for_netuid(netuid)
+            if current_alpha <= 0:
+                continue
+            fallback_grids.setdefault(
+                netuid,
+                self._build_emergency_grid(subnet_stats, current_alpha=current_alpha),
+            )
+
+        return fallback_grids
 
     def validateGrid(self):
         for subnet_id in self.subnet_grids:
@@ -509,18 +555,36 @@ class BittensorUtility():
                 await self.refresh_stats(all_validators)
 
                 # Brains strategy tick: record bars, compute patches
+                runtime_grids = None
+                fallback_reason = None
                 if _strategy_engine is not None:
                     try:
                         _strategy_engine.on_tick(
                             self.stats, self.static_subnet_grids,
                             self.current_stake_info, self.balance
                         )
-                        self.subnet_grids = _strategy_engine.get_runtime_subnet_grids(self.static_subnet_grids)
+                        runtime_grids = _strategy_engine.get_runtime_subnet_grids(self.static_subnet_grids)
                     except Exception as e:
                         logger.error(f'Brains on_tick error: {e}')
-                        self.subnet_grids = dict(self.static_subnet_grids)
+                        fallback_reason = 'Brains on_tick error'
+                elif self.static_subnet_grids:
+                    runtime_grids = dict(self.static_subnet_grids)
                 else:
-                    self.subnet_grids = dict(self.static_subnet_grids)
+                    fallback_reason = 'Brains unavailable'
+
+                if not runtime_grids:
+                    runtime_grids = self.build_fallback_subnet_grids()
+                    if fallback_reason and runtime_grids:
+                        logger.warning(
+                            f'{fallback_reason}; using fallback managed roster {sorted(runtime_grids.keys())}'
+                        )
+
+                self.subnet_grids = runtime_grids or {}
+                if self.subnet_grids:
+                    self.last_runtime_subnet_grids = {
+                        netuid: dict(config)
+                        for netuid, config in self.subnet_grids.items()
+                    }
 
                 logger.info(f'Tick {self.tick}: Printing table')
                 printHelpers.print_table_rich(self, console, self.current_stake_info, list(self.subnet_grids.keys()), self.stats, self.balance, self.subnet_grids)

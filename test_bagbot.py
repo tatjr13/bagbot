@@ -678,6 +678,41 @@ class TestBAGBot(unittest.TestCase):
             self.assertEqual(sorted(bu.subnet_grids.keys()), [11, 22])
             self.assertEqual(stub_engine.calls, [[11], [11, 22]])
 
+    def testRefreshSubnetGridPreservesRuntimeRosterWhenStaticGridBecomesEmpty(self):
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        bu.subnet_grids = {
+            11: {'buy_upper': 0.01, 'sell_lower': 0.02, 'max_alpha': 100},
+        }
+
+        dynamic_settings = bagbot.SimpleNamespace(
+            SUBNET_SETTINGS={},
+            BRAINS_DRY_RUN=False,
+            BUY_ZONE_POWER=1.0,
+            SELL_ZONE_POWER=1.0,
+        )
+
+        with patch.object(bagbot, 'load_safe_python_settings', return_value=dynamic_settings), \
+             patch.object(bagbot, '_settings_signature', return_value='sig-dynamic'):
+            bagbot.asyncio.run(bu.refresh_subnet_grid())
+
+        self.assertEqual(sorted(bu.subnet_grids.keys()), [11])
+
+    def testFallbackManagedRosterIncludesHeldSubnets(self):
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        bu.stats = {
+            42: {'price': 1.25, 'tao_in': 5000.0, 'alpha_in': 5000.0},
+        }
+        bu.current_stake_info = {
+            'somehotkey': {42: MockStake(4.0)},
+        }
+
+        fallback = bu.build_fallback_subnet_grids()
+        self.assertIn(42, fallback)
+        self.assertLess(fallback[42]['buy_upper'], fallback[42]['sell_lower'])
+        self.assertGreaterEqual(fallback[42]['max_alpha'], 4.0)
+
     def testExecuteBuyTradeUsesInclusionWhenMevProtectionEnabled(self):
         args = {}
         bagbot.bagbot_settings.ENABLE_MEV_PROTECTION = True

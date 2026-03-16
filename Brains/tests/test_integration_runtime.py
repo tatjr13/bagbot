@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from Brains.integration import StrategyEngine
+from Brains.integration import StrategyEngine, TaoStatsFlowCache
 from Brains.state import PriceBarStore, StrategyStateStore
 
 
@@ -213,11 +213,39 @@ class TestStrategyRuntimeRoster(unittest.TestCase):
             22: {'price': 1.00, 'tao_in': 5000.0, 'alpha_in': 5000.0},
         }
 
-        self._run_tick(engine, stats, stake_info={}, balance=10.0)
+        flow_cfg = dict(TEST_CFG)
+        flow_cfg['taostats_flow_enabled'] = True
+        with patch.dict('os.environ', {'TAOSTATS_API_KEY': 'test-key'}, clear=False), \
+             patch('Brains.config.load_config', return_value=flow_cfg):
+            engine.on_tick(stats, self.settings.SUBNET_SETTINGS, stake_info={}, balance=10.0)
         runtime_grids = engine.get_runtime_subnet_grids(self.settings.SUBNET_SETTINGS)
 
         self.assertEqual(list(runtime_grids.keys()), [22])
         self.assertIn(22, engine.buy_roster_netuids)
+
+    def test_stale_taostats_flow_snapshot_is_ignored(self):
+        with patch.dict('os.environ', {'TAOSTATS_API_KEY': 'test-key'}, clear=False):
+            cache = TaoStatsFlowCache(
+                {'taostats_flow_enabled': True, 'taostats_refresh_minutes': 10}
+            )
+        cache.by_netuid = {
+            22: {
+                'net_flow_1d_tao': 1000.0,
+                'net_flow_7d_tao': 7000.0,
+                'net_flow_30d_tao': 21000.0,
+                'tao_flow_tao': 0.0,
+                'ema_tao_flow_tao': 0.02,
+                'fee_rate': 0.0005,
+                'subnet_age_days': 42.0,
+            },
+        }
+        cache.last_refresh_at = time.time() - 3600
+        self.assertIsNone(cache.get(22))
+
+    def test_disabled_taostats_cache_does_not_return_old_rows(self):
+        cache = TaoStatsFlowCache({'taostats_flow_enabled': False, 'taostats_refresh_minutes': 10})
+        cache.by_netuid = {22: {'net_flow_1d_tao': 1000.0}}
+        self.assertIsNone(cache.get(22))
 
 
 if __name__ == '__main__':

@@ -33,17 +33,20 @@ Treat this as a constrained trading challenge:
 - `sqlite3 Brains/price_history.db "SELECT * FROM price_bars WHERE netuid=11 ORDER BY bar_time DESC LIMIT 20"` — recent 15m price bars
 - `sqlite3 Brains/price_history.db "SELECT DISTINCT netuid FROM price_bars ORDER BY netuid"` — all observed subnets
 - `sqlite3 Brains/price_history.db "SELECT * FROM fills ORDER BY timestamp DESC LIMIT 20"` — recent trade fills
+- `python Brains/research_harness.py --hours 168 --config Brains/config/threshold_farm.yaml` — offline replay score for the current config
 - `python Brains/taostats_api.py /api/stats/latest/v1` — read-only Taostats API access
 - `tail -100 staking.log | grep Brains` — recent Brains log entries
 - `cat Brains/config/threshold_farm.yaml` — current config
 - `cat bagbot_settings_overrides.py` — current bagbot settings (NEVER reveal WALLET_PW)
 
 ### External Research Rules
+- Prefer local evidence first: price bars, fills, the replay harness, and state files cost nothing and should be used before burning more Chutes calls
 - `TAOSTATS_API_KEY` is available for read-only Taostats research through `python Brains/taostats_api.py ...`
 - Taostats is rate-limited to **5 requests per minute**. Batch questions, avoid polling loops, and make each request count
 - Prefer direct Taostats API reads for chain research before reaching for third-party paid tooling
 - When local bar history is still shallow, use Taostats as supplemental context instead of defaulting to passivity
 - Prefer subnet-level Taostats reads that expose `net_flow_1_day`, `net_flow_7_days`, `net_flow_30_days`, `tao_flow`, and `ema_tao_flow` when deciding whether a subnet has real chain-supported demand behind it
+- The Chutes account is allowed to roll from the free tier into pay-as-you-go, but do not waste calls on repetitive analysis that the local replay harness or SQLite history can answer
 - Do not use Handshake58, drain-mcp, or any paid information channel unless the operator explicitly authorizes a separate research budget and wallet
 
 ### Show Strategy
@@ -75,6 +78,8 @@ You may improve the strategy using feedback from trading results, but stay withi
 - Treat the configured subnet set as a live roster, not a permanent list. Scan all observed subnets and promote new candidates into the roster when liquidity, history, slippage, and behavior justify it. Remove weaker names when they stop earning their slot, and keep the active roster in the **5-7 position** range unless evidence strongly supports fewer.
 - Bagbot hot-reloads `bagbot_settings_overrides.py`, so subnet roster and sizing changes can take effect without restarting the trading process
 - You may use `staking.log`, SQLite fills, and strategy state to evaluate whether a change improved outcomes
+- Before making a material config change, prefer creating a candidate YAML and comparing it offline with `python Brains/research_harness.py --hours 168 --config Brains/config/threshold_farm.yaml --config /tmp/candidate.yaml`
+- Only promote a config change when the replay harness improves net TAO objective without clearly worsening drawdown or churn
 - Prefer atomic subnet-to-subnet rotations when the runtime supports them, especially when they reduce fees and keep capital continuously deployed
 - Prefer MEV-protected execution for meaningful live reallocations when available in the runtime
 - You should explicitly account for pool depth and estimated slippage before increasing size or adding exposure

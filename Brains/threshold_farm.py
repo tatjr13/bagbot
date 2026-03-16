@@ -40,9 +40,10 @@ def compute_signals(
     max_buy_tao: float,
     bar_store: PriceBarStore,
     now: float = None,
+    cfg: Dict = None,
 ) -> SignalSnapshot:
     """Compute all signals for a subnet from stored price bars."""
-    cfg = config.load_config()
+    cfg = cfg or config.load_config()
     lookbacks = cfg.get('lookbacks', {})
     now = now or time.time()
 
@@ -67,7 +68,8 @@ def compute_signals(
     vol_prices = bar_store.get_close_prices(netuid, vol_hours, now)
     range_short_prices = bar_store.get_close_prices(netuid, range_short_h, now)
     range_med_prices = bar_store.get_close_prices(netuid, range_med_h, now)
-    mom_prices = bar_store.get_close_prices(netuid, mom_short_h, now)
+    mom_history_hours = mom_short_h + (bar_minutes / 60.0)
+    mom_prices = bar_store.get_close_prices(netuid, mom_history_hours, now)
 
     # Get bars for tao_in data
     bars_all = bar_store.get_bars(netuid, ema_hours, now)
@@ -115,12 +117,13 @@ def compute_thresholds(
     portfolio_value_tao: float,
     dry_run: bool = True,
     now: float = None,
+    cfg: Dict = None,
 ) -> Optional[ThresholdPatch]:
     """Compute threshold patch for a subnet.
 
     Returns None if cooldowns prevent update or warmup is insufficient.
     """
-    cfg = config.load_config()
+    cfg = cfg or config.load_config()
     now = now or time.time()
 
     warmup_min_h = cfg.get('warmup_min_hours', 24)
@@ -137,8 +140,11 @@ def compute_thresholds(
 
     # Warmup gate: no adaptive thresholds until warmup_min_hours
     warmup_ratio_gate = 0.0
-    if warmup_min_h > 0 and warmup_full_h > 0:
-        warmup_ratio_gate = (warmup_min_h / warmup_full_h) * 0.5
+    if warmup_min_h > 0:
+        if warmup_full_h > 0:
+            warmup_ratio_gate = min(max(warmup_min_h / warmup_full_h, 0.0), 1.0)
+        else:
+            warmup_ratio_gate = 1.0
 
     # We use confidence as a proxy for history availability.
     if snap.confidence < warmup_ratio_gate:
