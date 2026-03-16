@@ -12,6 +12,7 @@ MAX_TAO_PER_BUY = 0.02 #May increase as desired, I wouldnt reduce it.
 MAX_TAO_PER_SELL = 0.02 #May increase as desired, I wouldnt reduce it
 MAX_SLIPPAGE_PERCENT_PER_BUY = 0.2 #If over this slippage %, buy trades won't execute.
 MAX_SUBNET_ALLOCATION_RATIO = None #Optional cap on single-subnet exposure as a fraction of total portfolio value
+IGNORE_NON_CONFIGURED_STAKE_BELOW_TAO = 0.01 #Ignore tiny legacy stake on alternate validators below this TAO value
 
 # Power curve settings for buy/sell zones (1.0 = linear, >1.0 = more aggressive early, <1.0 = more conservative early)
 # Must be positive. Suggested range: 0.1 to 10

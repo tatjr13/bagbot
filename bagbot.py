@@ -133,6 +133,15 @@ def resolve_wallet_password(settings):
         raise InvalidSettings('WALLET_PW is missing; set WALLET_PW, WALLET_PW_ENV, or WALLET_PW_FILE')
     return wallet_pw
 
+
+def legacy_dust_threshold_tao(settings):
+    """Return the TAO-value threshold below which non-configured legacy stake is ignored."""
+    threshold = getattr(settings, 'IGNORE_NON_CONFIGURED_STAKE_BELOW_TAO', 0.01)
+    try:
+        return max(0.0, float(threshold))
+    except (TypeError, ValueError):
+        raise InvalidSettings('IGNORE_NON_CONFIGURED_STAKE_BELOW_TAO must be a non-negative number')
+
 bagbot_settings = load_safe_python_settings()
 
 # Brains strategy engine (optional, enabled via BRAINS_ENABLED in settings)
@@ -465,8 +474,11 @@ class BittensorUtility():
         for hotkey in hotkeys:
             for subnet_netuid in self.current_stake_info[hotkey]:
                 if subnet_netuid in self.current_stake_info[hotkey] and self.current_stake_info[hotkey][subnet_netuid].stake.rao == 0: continue
-                sumStakedValue += rao_to_tao(self.current_stake_info[hotkey][subnet_netuid].stake.rao) * self.stats[subnet_netuid]['price']
-                tickLog.append( f'sn{subnet_netuid}: {rao_to_tao(self.current_stake_info[hotkey][subnet_netuid].stake.rao):.1f}' )
+                stake_tao = rao_to_tao(self.current_stake_info[hotkey][subnet_netuid].stake.rao)
+                if self._ignore_non_configured_legacy_dust(hotkey, subnet_netuid, stake_tao):
+                    continue
+                sumStakedValue += stake_tao * self.stats[subnet_netuid]['price']
+                tickLog.append( f'sn{subnet_netuid}: {stake_tao:.1f}' )
 
         logger.info('{' + f'wallet_value:"{sumStakedValue:.2f} + {self.balance:.2f}", ' + ', '.join(tickLog) + '}')
 
@@ -645,7 +657,10 @@ class BittensorUtility():
         total_stake = 0
         for hotkey in self.current_stake_info:
             stake_obj = self.current_stake_info[hotkey].get(subnet_netuid)
-            total_stake += (float(stake_obj.stake) if stake_obj is not None else 0.0)
+            stake_amt = (float(stake_obj.stake) if stake_obj is not None else 0.0)
+            if self._ignore_non_configured_legacy_dust(hotkey, subnet_netuid, stake_amt):
+                continue
+            total_stake += stake_amt
         return total_stake
 
 
@@ -654,6 +669,8 @@ class BittensorUtility():
         for hotkey in self.current_stake_info:
             for subnet_netuid, stake_obj in self.current_stake_info[hotkey].items():
                 if stake_obj is None or subnet_netuid not in self.stats:
+                    continue
+                if self._ignore_non_configured_legacy_dust(hotkey, subnet_netuid, float(stake_obj.stake)):
                     continue
                 total_value += float(stake_obj.stake) * self.stats[subnet_netuid]['price']
         return total_value
@@ -670,6 +687,22 @@ class BittensorUtility():
         return float(stake_obj.stake) if stake_obj is not None else 0.0
 
 
+    def _non_configured_legacy_value_tao(self, hotkey, subnet_netuid, stake_amount):
+        configured_validator = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
+        if hotkey == configured_validator:
+            return None
+        if subnet_netuid not in self.stats:
+            return None
+        return max(0.0, float(stake_amount)) * float(self.stats[subnet_netuid]['price'])
+
+
+    def _ignore_non_configured_legacy_dust(self, hotkey, subnet_netuid, stake_amount):
+        legacy_value_tao = self._non_configured_legacy_value_tao(hotkey, subnet_netuid, stake_amount)
+        if legacy_value_tao is None:
+            return False
+        return legacy_value_tao <= legacy_dust_threshold_tao(bagbot_settings)
+
+
     def determineHotKey(self, unstake_amt, subnet_netuid):
         # Prioritize the configured validator for this subnet
         configured_validator = self.get_subnet_setting(subnet_netuid, 'stake_on_validator', bagbot_settings.STAKE_ON_VALIDATOR)
@@ -680,6 +713,22 @@ class BittensorUtility():
             stake = (float(stake_obj.stake) if stake_obj is not None else 0.0)
             if stake > 0:
                 return configured_validator
+
+        legacy_dust_total_tao = 0.0
+        for hotkey, subnet_stakes in self.current_stake_info.items():
+            stake_obj = subnet_stakes.get(subnet_netuid)
+            stake_amt = float(stake_obj.stake) if stake_obj is not None else 0.0
+            legacy_value_tao = self._non_configured_legacy_value_tao(hotkey, subnet_netuid, stake_amt)
+            if legacy_value_tao is None:
+                continue
+            legacy_dust_total_tao += legacy_value_tao
+
+        if legacy_dust_total_tao <= legacy_dust_threshold_tao(bagbot_settings):
+            logger.debug(
+                f'Ignoring non-configured legacy dust on subnet {subnet_netuid}: '
+                f'{legacy_dust_total_tao:.6f} TAO across alternate validators'
+            )
+            return None
 
         # If configured validator has no stake, don't sell from other validators
         # (This prevents accidentally selling stake from validators the user doesn't want to trade on)

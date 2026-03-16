@@ -27,6 +27,7 @@ class TestBAGBot(unittest.TestCase):
         bagbot.bagbot_settings.MIN_TAO_RESERVE = 0.0
         bagbot.bagbot_settings.EXECUTION_FEE_BUFFER_TAO = 0.0
         bagbot.bagbot_settings.MAX_SUBNET_ALLOCATION_RATIO = None
+        bagbot.bagbot_settings.IGNORE_NON_CONFIGURED_STAKE_BELOW_TAO = 0.01
         bagbot.bagbot_settings.WALLET_PW_ENV = None
         bagbot.bagbot_settings.WALLET_PW_FILE = None
         bagbot.bagbot_settings.STAKE_ON_VALIDATOR = 'somehotkey'
@@ -547,6 +548,34 @@ class TestBAGBot(unittest.TestCase):
         trade = bu.constructSell(71, force_sell=True, desired_tao=12.0)
         self.assertIsNotNone(trade)
         self.assertLessEqual(float(trade['alpha_amount']), 10.0)
+
+    def testMyCurrentStakeIgnoresDustOnAlternateValidator(self):
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        configured = bagbot.bagbot_settings.STAKE_ON_VALIDATOR
+        bagbot.bagbot_settings.IGNORE_NON_CONFIGURED_STAKE_BELOW_TAO = 0.01
+        bu.stats = {71: {'price': 0.009}}
+        bu.current_stake_info = {
+            configured: {71: MockStake(10.0)},
+            'other-validator': {71: MockStake(0.1)},
+        }
+
+        self.assertTrue(math.isclose(bu.my_current_stake(71), 10.0, rel_tol=1e-6))
+
+    def testDetermineHotKeySilentlyIgnoresDustOnlyAlternateStake(self):
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        configured = bagbot.bagbot_settings.STAKE_ON_VALIDATOR
+        bagbot.bagbot_settings.IGNORE_NON_CONFIGURED_STAKE_BELOW_TAO = 0.01
+        bu.stats = {71: {'price': 0.009}}
+        bu.current_stake_info = {
+            configured: {},
+            'other-validator': {71: MockStake(0.1)},
+        }
+
+        with patch.object(bagbot.logger, 'warning') as mock_warning:
+            self.assertIsNone(bu.determineHotKey(1.0, 71))
+        mock_warning.assert_not_called()
 
     def testExecuteRotationTradeFallsBackWithoutMevOnShieldOutcomeFailure(self):
         args = {}
