@@ -1,16 +1,96 @@
 """Thin integration wrapper: StrategyEngine.on_tick() and on_fill() wiring."""
 
-import time
 import logging
+import math
+import os
+import time
+from dataclasses import replace
 from typing import Dict, List, Optional, Set
 
 from Brains import config
 from Brains.models import ThresholdPatch, FillRecord, SubnetState
 from Brains.state import PriceBarStore, StrategyStateStore
+from Brains import taostats_api
 from Brains.threshold_farm import compute_signals, compute_thresholds
 from Brains.risk import get_preset, passes_subnet_universe_filter
 
 logger = logging.getLogger(__name__)
+RAO_PER_TAO = 1_000_000_000.0
+
+
+def _float_or_zero(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _rao_to_tao(value) -> float:
+    return _float_or_zero(value) / RAO_PER_TAO
+
+
+class TaoStatsFlowCache:
+    """Cached Taostats subnet flow snapshot used for roster ranking."""
+
+    def __init__(self, cfg: Dict):
+        self.by_netuid: Dict[int, Dict[str, float]] = {}
+        self.last_refresh_at = 0.0
+        self.last_error = ""
+        self.refresh_seconds = 600.0
+        self.timeout_seconds = 20.0
+        self.enabled = False
+        self.refresh_config(cfg)
+
+    def refresh_config(self, cfg: Dict) -> None:
+        refresh_minutes = float(cfg.get('taostats_refresh_minutes', 10.0) or 10.0)
+        self.refresh_seconds = max(60.0, refresh_minutes * 60.0)
+        self.enabled = bool(cfg.get('taostats_flow_enabled', True)) and bool(
+            os.environ.get('TAOSTATS_API_KEY', '').strip()
+        )
+
+    def get(self, netuid: int) -> Optional[Dict[str, float]]:
+        return self.by_netuid.get(netuid)
+
+    def maybe_refresh(self, force: bool = False) -> None:
+        if not self.enabled:
+            return
+
+        now = time.time()
+        if not force and self.by_netuid and (now - self.last_refresh_at) < self.refresh_seconds:
+            return
+
+        try:
+            url = taostats_api.build_url('/api/subnet/latest/v1', ['page=1', 'limit=200'])
+            taostats_api.enforce_rate_limit(
+                float(os.environ.get('TAOSTATS_RATE_LIMIT_PER_MIN', 5) or 5),
+                no_wait=False,
+            )
+            payload = taostats_api.fetch(url, self.timeout_seconds)
+            rows = payload.get('data', []) if isinstance(payload, dict) else payload
+            next_by_netuid: Dict[int, Dict[str, float]] = {}
+            for row in rows or []:
+                netuid = int(row.get('netuid', -1))
+                if netuid < 0:
+                    continue
+                next_by_netuid[netuid] = {
+                    'net_flow_1d_tao': _rao_to_tao(row.get('net_flow_1_day')),
+                    'net_flow_7d_tao': _rao_to_tao(row.get('net_flow_7_days')),
+                    'net_flow_30d_tao': _rao_to_tao(row.get('net_flow_30_days')),
+                    'tao_flow_tao': _rao_to_tao(row.get('tao_flow')),
+                    'ema_tao_flow_tao': _rao_to_tao(row.get('ema_tao_flow')),
+                    'fee_rate': _float_or_zero(row.get('fee_rate')),
+                }
+
+            if next_by_netuid:
+                self.by_netuid = next_by_netuid
+                self.last_refresh_at = now
+                self.last_error = ""
+                logger.info(
+                    f'Taostats flow snapshot refreshed for {len(self.by_netuid)} subnets'
+                )
+        except Exception as exc:
+            self.last_error = str(exc)
+            logger.warning(f'Taostats flow refresh failed: {exc}')
 
 
 class StrategyEngine:
@@ -32,6 +112,7 @@ class StrategyEngine:
         self.risk_mode = self.cfg.get('risk_mode_default', 'conservative')
         self.max_live = self.cfg.get('max_live_subnets', 3)
         self.bar_minutes = self.cfg.get('bar_size_minutes', 15)
+        self.taostats_flow_cache = TaoStatsFlowCache(self.cfg)
         self.dry_run = True
         self.tradable_netuids: Set[int] = set()
         self.runtime_netuids: Set[int] = set()
@@ -71,6 +152,7 @@ class StrategyEngine:
         self.risk_mode = latest_risk_mode
         self.max_live = latest_max_live
         self.bar_minutes = latest_bar_minutes
+        self.taostats_flow_cache.refresh_config(latest_cfg)
 
     def refresh_runtime_settings(self, bagbot_settings):
         """Refresh settings-derived runtime state without losing bar history."""
@@ -131,6 +213,25 @@ class StrategyEngine:
         slippage_penalty = min(max(snap.est_slippage_pct / 100.0, 0.0), 0.5)
         momentum_penalty = max(0.0, snap.momentum_6h) * 0.5
         inventory_penalty = snap.inventory_ratio * 0.10
+        flow_day_scale = max(float(self.cfg.get('taostats_flow_day_norm_tao', 500.0) or 500.0), 1.0)
+        flow_week_scale = max(float(self.cfg.get('taostats_flow_week_norm_tao', 350.0) or 350.0), 1.0)
+        flow_ema_scale = max(float(self.cfg.get('taostats_flow_ema_norm_tao', 0.01) or 0.01), 1e-6)
+        flow_day_signal = math.tanh(snap.net_flow_1d_tao / flow_day_scale)
+        flow_week_signal = math.tanh((snap.net_flow_7d_tao / 7.0) / flow_week_scale)
+        flow_ema_signal = math.tanh(snap.ema_tao_flow_tao / flow_ema_scale)
+        flow_bonus = (
+            max(0.0, flow_day_signal) * 0.18
+            + max(0.0, flow_week_signal) * 0.10
+            + max(0.0, flow_ema_signal) * 0.05
+        )
+        flow_alignment_bonus = 0.0
+        if flow_day_signal > 0.0 and flow_week_signal > 0.0:
+            flow_alignment_bonus = min(flow_day_signal, flow_week_signal) * 0.06
+        flow_penalty = (
+            max(0.0, -flow_day_signal) * 0.20
+            + max(0.0, -flow_week_signal) * 0.10
+            + max(0.0, -flow_ema_signal) * 0.05
+        )
         configured_bonus = 0.05 if is_configured else 0.0
         held_bonus = 0.04 if is_held else 0.0
         live_bonus = 0.03 if was_live else 0.0
@@ -142,12 +243,15 @@ class StrategyEngine:
             + volume_bonus
             + liquidity_bonus
             + confidence_bonus
+            + flow_bonus
+            + flow_alignment_bonus
             + configured_bonus
             + held_bonus
             + live_bonus
             - slippage_penalty
             - momentum_penalty
             - inventory_penalty
+            - flow_penalty
         )
         if patch.regime == 'pump':
             score -= 0.10
@@ -176,6 +280,7 @@ class StrategyEngine:
         patches for a dynamic roster built from all observed subnets.
         """
         self.refresh_strategy_config()
+        self.taostats_flow_cache.maybe_refresh()
         now = time.time()
         preset = get_preset(self.risk_mode)
 
@@ -212,6 +317,7 @@ class StrategyEngine:
         candidate_rows = []
         next_patches: Dict[int, ThresholdPatch] = dict(self.patches)
         next_dynamic_subnet_grids: Dict[int, Dict] = dict(self.dynamic_subnet_grids)
+        bootstrap_refresh = not self.patches
 
         for netuid in sorted(stats.keys()):
             if netuid not in stats:
@@ -255,15 +361,19 @@ class StrategyEngine:
                 bar_store=self.bar_store,
                 now=now,
             )
+            flow_snapshot = self.taostats_flow_cache.get(netuid)
+            if flow_snapshot is not None:
+                snap = replace(snap, **flow_snapshot)
 
             # Get state and daily turnover
             state = self.state_store.get(netuid)
+            state_for_compute = replace(state, last_patch_at=0.0) if bootstrap_refresh else state
             daily_buy, daily_sell = self.bar_store.get_daily_turnover(netuid, now)
 
             # Compute thresholds
             fresh_patch = compute_thresholds(
                 snap=snap,
-                state=state,
+                state=state_for_compute,
                 preset=preset,
                 original_grid=grid,
                 daily_buy_tao=daily_buy,
@@ -341,10 +451,19 @@ class StrategyEngine:
             new_runtime_order != self.runtime_ordered_netuids
             or new_buy_roster != self.buy_roster_netuids
         ):
+            flow_summaries = []
+            for row in top_rows[:3]:
+                flow_tao = next_patches.get(row['netuid']) and self.taostats_flow_cache.get(row['netuid'])
+                if not flow_tao:
+                    continue
+                flow_summaries.append(
+                    f"sn{row['netuid']}:{flow_tao.get('net_flow_1d_tao', 0.0):+.0f}t/d"
+                )
             logger.info(
                 'Brains runtime roster refreshed: '
                 f'live={top_netuids}, buy_enabled={sorted(new_buy_roster)}, '
-                f'exit_only={exit_only_netuids}'
+                f'exit_only={exit_only_netuids}, '
+                f'flow_1d={flow_summaries}'
             )
 
         self.runtime_ordered_netuids = new_runtime_order

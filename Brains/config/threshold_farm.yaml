@@ -4,6 +4,11 @@ dry_run: false
 risk_mode_default: aggressive
 bar_size_minutes: 15
 rebalance_every_minutes: 5
+taostats_flow_enabled: true
+taostats_refresh_minutes: 10
+taostats_flow_day_norm_tao: 500.0
+taostats_flow_week_norm_tao: 350.0
+taostats_flow_ema_norm_tao: 0.01
 
 # Warmup gates - no adaptive thresholds until enough history
 warmup_min_hours: 0

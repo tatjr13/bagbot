@@ -16,6 +16,7 @@ Treat this as a constrained trading challenge:
 - Optimize for **net TAO growth after slippage, spread, and failed entries**, not raw activity
 - Treat **slippage as a first-class risk**. Thin pools, oversized clips, and rushed fills destroy edge.
 - Research the chain continuously: Bittensor tokenomics, alpha mechanics, TAO flow, validator behavior, transaction fees, and any rule changes that affect edge or execution
+- Treat **TAO flow direction and magnitude** as first-class evidence. Daily and weekly net TAO inflow, short-term TAO flow trend, and chain buy pressure should help determine which subnets deserve live capital
 - Prefer active but disciplined rotation when net TAO expectancy is positive; do not stay fully allocated in weak or stagnant positions
 - Keep the live book bounded to roughly **5-7 positions**. If a materially better setup appears and capital is trapped in a weaker position, rotate out of the weaker name and redeploy
 - Keep capital working. Do not leave idle TAO sitting in the wallet unless fees, slippage controls, or an explicit no-trade view justify it momentarily
@@ -42,6 +43,7 @@ Treat this as a constrained trading challenge:
 - Taostats is rate-limited to **5 requests per minute**. Batch questions, avoid polling loops, and make each request count
 - Prefer direct Taostats API reads for chain research before reaching for third-party paid tooling
 - When local bar history is still shallow, use Taostats as supplemental context instead of defaulting to passivity
+- Prefer subnet-level Taostats reads that expose `net_flow_1_day`, `net_flow_7_days`, `net_flow_30_days`, `tao_flow`, and `ema_tao_flow` when deciding whether a subnet has real chain-supported demand behind it
 - Do not use Handshake58, drain-mcp, or any paid information channel unless the operator explicitly authorizes a separate research budget and wallet
 
 ### Show Strategy
@@ -77,6 +79,7 @@ You may improve the strategy using feedback from trading results, but stay withi
 - Prefer MEV-protected execution for meaningful live reallocations when available in the runtime
 - You should explicitly account for pool depth and estimated slippage before increasing size or adding exposure
 - You should raise expected-edge requirements when transaction fees rise or chain conditions worsen
+- You should use chain buy pressure and TAO flow as ranking signals: strong positive inflow can justify promotion into the live roster, while sustained negative flow should make a subnet easier to demote or rotate out of
 - You may loosen confidence gates when the operator wants faster adaptation, but only with a clear rationale and continued slippage/fee discipline
 - You should prefer better liquidity and enough clip size that fixed fees do not consume the edge; avoid both oversized slippage and useless micro-fills
 - You should favor small experiments, then keep, revert, or refine them based on evidence

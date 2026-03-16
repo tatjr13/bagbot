@@ -17,6 +17,7 @@ TEST_CFG = {
     'risk_mode_default': 'aggressive',
     'bar_size_minutes': 15,
     'max_live_subnets': 1,
+    'taostats_flow_enabled': False,
     'warmup_min_hours': 0,
     'warmup_full_hours': 0,
     'freeze_buys_if_confidence_lt': 0.01,
@@ -93,6 +94,14 @@ class TestStrategyRuntimeRoster(unittest.TestCase):
             engine.bar_store.record_tick(11, p11, 5000.0, 5000.0, timestamp=timestamp, bar_minutes=15)
             engine.bar_store.record_tick(22, p22, 7000.0, 7000.0, timestamp=timestamp, bar_minutes=15)
 
+    def _seed_equal_history(self, engine):
+        now = time.time()
+        prices = [1.00] * 12
+        for idx, price in enumerate(prices):
+            timestamp = now - ((len(prices) - idx) * 900)
+            engine.bar_store.record_tick(11, price, 5000.0, 5000.0, timestamp=timestamp, bar_minutes=15)
+            engine.bar_store.record_tick(22, price, 5000.0, 5000.0, timestamp=timestamp, bar_minutes=15)
+
     def _run_tick(self, engine, stats, stake_info, balance):
         with patch('Brains.config.load_config', return_value=TEST_CFG):
             engine.on_tick(stats, self.settings.SUBNET_SETTINGS, stake_info=stake_info, balance=balance)
@@ -159,6 +168,56 @@ class TestStrategyRuntimeRoster(unittest.TestCase):
         self.assertEqual(engine.runtime_ordered_netuids, [22])
         self.assertIn(22, engine.buy_roster_netuids)
         self.assertIs(engine.get_patch(22), first_patch)
+
+    def test_restart_bootstrap_recomputes_runtime_roster_from_persisted_state(self):
+        engine = self._make_engine()
+        self._seed_history(engine)
+
+        stats = {
+            11: {'price': 1.00, 'tao_in': 5000.0, 'alpha_in': 5000.0},
+            22: {'price': 0.90, 'tao_in': 7000.0, 'alpha_in': 7000.0},
+        }
+
+        cooldown_cfg = dict(TEST_CFG)
+        cooldown_cfg['min_minutes_between_threshold_updates'] = 60
+        with patch('Brains.config.load_config', return_value=cooldown_cfg):
+            engine.on_tick(stats, self.settings.SUBNET_SETTINGS, stake_info={}, balance=10.0)
+        self.assertEqual(engine.runtime_ordered_netuids, [22])
+
+        restarted = self._make_engine()
+        self._seed_history(restarted)
+        with patch('Brains.config.load_config', return_value=cooldown_cfg):
+            restarted.on_tick(stats, self.settings.SUBNET_SETTINGS, stake_info={}, balance=10.0)
+
+        runtime_grids = restarted.get_runtime_subnet_grids(self.settings.SUBNET_SETTINGS)
+        self.assertEqual(list(runtime_grids.keys()), [22])
+        self.assertIn(22, restarted.buy_roster_netuids)
+
+    def test_positive_chain_buy_pressure_can_promote_dynamic_subnet(self):
+        engine = self._make_engine()
+        self._seed_equal_history(engine)
+        engine.taostats_flow_cache.by_netuid = {
+            22: {
+                'net_flow_1d_tao': 1000.0,
+                'net_flow_7d_tao': 7000.0,
+                'net_flow_30d_tao': 21000.0,
+                'tao_flow_tao': 0.0,
+                'ema_tao_flow_tao': 0.02,
+                'fee_rate': 0.0005,
+            },
+        }
+        engine.taostats_flow_cache.last_refresh_at = time.time()
+
+        stats = {
+            11: {'price': 1.00, 'tao_in': 5000.0, 'alpha_in': 5000.0},
+            22: {'price': 1.00, 'tao_in': 5000.0, 'alpha_in': 5000.0},
+        }
+
+        self._run_tick(engine, stats, stake_info={}, balance=10.0)
+        runtime_grids = engine.get_runtime_subnet_grids(self.settings.SUBNET_SETTINGS)
+
+        self.assertEqual(list(runtime_grids.keys()), [22])
+        self.assertIn(22, engine.buy_roster_netuids)
 
 
 if __name__ == '__main__':
