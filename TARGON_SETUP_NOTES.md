@@ -37,6 +37,14 @@ This file captures the current live Bagbot/Arbos operating model and the Targon 
 - Current design goal is an active book of roughly `5-7` positions, with permission to rotate out of weak inventory into better setups
 - The bot must never transfer funds to another wallet
 
+## Telegram UX
+
+- The live Targon `arbos.py` runtime has a calm Telegram overlay applied on top of upstream Arbos
+- Rapid operator messages are batched for a short debounce window before the bot replies
+- Operator replies use a calmer status + final-answer pattern instead of constant token-stream edits
+- Autonomous step status edits are throttled more heavily so the chat is less jumpy during normal operation
+- Because Arbos is cloned from its own upstream repo at deploy time, this Telegram UX patch should be treated as a Targon runtime customization unless it is upstreamed separately
+
 ## Wallet Notes
 
 - Current live wallet identity is `Falcon`
