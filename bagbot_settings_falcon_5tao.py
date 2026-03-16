@@ -32,47 +32,6 @@ SELL_ZONE_POWER = 0.2
 BRAINS_ENABLED = True
 BRAINS_DRY_RUN = False
 
-SUBNET_SETTINGS = {
-    22: {
-        "buy_lower": 0.004,
-        "buy_upper": 0.0055,
-        "sell_lower": 0.006,
-        "sell_upper": 0.01,
-        "max_alpha": 2000,
-    },
-    15: {
-        "buy_lower": 0.008,
-        "buy_upper": 0.01,
-        "sell_lower": 0.016,
-        "sell_upper": 0.03,
-        "max_alpha": 500,
-    },
-    107: {
-        "buy_lower": 0.01,
-        "buy_upper": 0.0165,
-        "sell_lower": 0.02,
-        "sell_upper": 0.03,
-        "max_alpha": 1000,
-    },
-    100: {
-        "buy_lower": 0.01,
-        "buy_upper": 0.0155,
-        "sell_lower": 0.018,
-        "sell_upper": 0.02,
-        "max_alpha": 1000,
-    },
-    11: {
-        "buy_lower": 0.012,
-        "buy_upper": 0.013,
-        "sell_lower": 0.014,
-        "sell_upper": 0.03,
-        "max_alpha": 2000,
-    },
-    93: {
-        "buy_zone_power": 1.2,
-        "buy_lower": 0.01,
-        "buy_upper": 0.014,
-        "sell": 0.04,
-        "max_alpha": 2000,
-    },
-}
+# Keep the static grid empty so Brains can score the full observed subnet universe
+# and build the live roster dynamically from market conditions.
+SUBNET_SETTINGS = {}
