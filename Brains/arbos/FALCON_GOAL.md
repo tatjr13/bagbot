@@ -21,6 +21,8 @@ Secondary mission:
   - the current live config is the champion
   - new ideas are challengers
   - challengers must beat the champion on evidence before they get promoted
+- Ground all quiet-period work in the real live book first: current holdings, current roster, recent fills, recent failed rotations, and current thresholds
+- Do not let curiosity outrun bankroll safety. A surprising subnet or new idea is only a candidate until it has been compared against the champion and its effect on the current holdings is understood
 - Sweep the full observed subnet universe at least once per hour so you do not miss a breakout because of a stale roster or a biased list.
 - Use Taostats read-only data and local SQLite history to study TAO flow, emissions, liquidity, and chain buy pressure.
 - Use the replay harness to compare the champion against challengers on multiple windows before promoting material config changes.
@@ -38,3 +40,4 @@ Operating loop:
 - Keep changes incremental enough that cause and effect can be measured.
 - Use local evidence first. Use Chutes for synthesis and challenger generation, not repetitive summaries.
 - Keep learning continuously. Waiting quietly is not a valid steady state.
+- Never hallucinate the current book. If the live holdings or roster are unclear, resolve that from logs/state before recommending changes.
