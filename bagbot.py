@@ -910,6 +910,27 @@ class BittensorUtility():
         return float(getattr(bagbot_settings, 'ROTATION_EXTRINSIC_FEE_BUFFER_TAO', 0.0002) or 0.0002)
 
 
+    def _scaled_rotation_trade(self, rotation_trade, scale):
+        """Retry impossible swaps at a smaller exact size instead of giving up immediately."""
+        if scale >= 1.0:
+            return dict(rotation_trade)
+
+        scaled_trade = dict(rotation_trade)
+        origin_netuid = rotation_trade['origin_netuid']
+        original_alpha = float(rotation_trade['alpha_amount'])
+        scaled_alpha = max(0.0, original_alpha * scale)
+        scaled_trade['alpha_amount'] = bt.utils.balance.tao(scaled_alpha, origin_netuid)
+
+        for key in ('approx_tao', 'estimated_fee_tao', 'simulated_destination_alpha'):
+            if scaled_trade.get(key) is not None:
+                scaled_trade[key] = float(scaled_trade[key]) * scale
+
+        reason = scaled_trade.get('rotation_reason', '')
+        suffix = f'resized_to={scale:.0%} after ZeroMaxStakeAmount'
+        scaled_trade['rotation_reason'] = f'{reason}; {suffix}' if reason else suffix
+        return scaled_trade
+
+
     def _limit_or_unbounded(self, raw_limit):
         if raw_limit is None:
             return float('inf')
@@ -1295,17 +1316,17 @@ class BittensorUtility():
 
 
     async def execute_rotation_trade(self, rotationTrade):
-        async def submit_rotation(mev_protection):
+        async def submit_rotation(active_trade, mev_protection):
             return await asyncio.wait_for(
                 self.sub.swap_stake(
                     wallet=self.wallet,
-                    hotkey_ss58=rotationTrade['hotkey'],
-                    origin_netuid=rotationTrade['origin_netuid'],
-                    destination_netuid=rotationTrade['destination_netuid'],
-                    amount=rotationTrade['alpha_amount'],
+                    hotkey_ss58=active_trade['hotkey'],
+                    origin_netuid=active_trade['origin_netuid'],
+                    destination_netuid=active_trade['destination_netuid'],
+                    amount=active_trade['alpha_amount'],
                     safe_swapping=True,
                     allow_partial_stake=False,
-                    rate_tolerance=rotationTrade['max_slippage'],
+                    rate_tolerance=active_trade['max_slippage'],
                     mev_protection=mev_protection,
                     wait_for_inclusion=True,
                     wait_for_finalization=False,
@@ -1314,63 +1335,86 @@ class BittensorUtility():
                 timeout=60.0
             )
 
-        def record_rotation_fill():
+        def record_rotation_fill(active_trade):
             if _strategy_engine is not None:
                 try:
                     _strategy_engine.on_fill(
-                        netuid=rotationTrade['origin_netuid'], side='sell',
-                        tao_amount=rotationTrade['approx_tao'],
-                        alpha_amount=float(rotationTrade['alpha_amount']),
-                        price=self.stats[rotationTrade['origin_netuid']]['price'],
+                        netuid=active_trade['origin_netuid'], side='sell',
+                        tao_amount=active_trade['approx_tao'],
+                        alpha_amount=float(active_trade['alpha_amount']),
+                        price=self.stats[active_trade['origin_netuid']]['price'],
                     )
                     _strategy_engine.on_fill(
-                        netuid=rotationTrade['destination_netuid'], side='buy',
-                        tao_amount=max(0.0, rotationTrade['approx_tao'] - rotationTrade['estimated_fee_tao']),
-                        alpha_amount=rotationTrade['simulated_destination_alpha'],
-                        price=self.stats[rotationTrade['destination_netuid']]['price'],
+                        netuid=active_trade['destination_netuid'], side='buy',
+                        tao_amount=max(0.0, active_trade['approx_tao'] - active_trade['estimated_fee_tao']),
+                        alpha_amount=active_trade['simulated_destination_alpha'],
+                        price=self.stats[active_trade['destination_netuid']]['price'],
                     )
                 except Exception as e:
                     logger.error(f'Brains on_fill error (rotation): {e}')
 
         try:
+            active_trade = dict(rotationTrade)
             logger.info(
-                f"Attempting atomic swap from sn{rotationTrade['origin_netuid']} to sn{rotationTrade['destination_netuid']} "
-                f"for {float(rotationTrade['alpha_amount'])} alpha with expected net edge {rotationTrade['net_edge_pct']:.2%}"
+                f"Attempting atomic swap from sn{active_trade['origin_netuid']} to sn{active_trade['destination_netuid']} "
+                f"for {float(active_trade['alpha_amount'])} alpha with expected net edge {active_trade['net_edge_pct']:.2%}"
             )
-            swap_result = await submit_rotation(rotationTrade['mev_protection'])
-            print(f'after rotation {str(rotationTrade)}')
+            swap_result = await submit_rotation(active_trade, active_trade['mev_protection'])
+            print(f'after rotation {str(active_trade)}')
             if swap_result is True or swap_result.__dict__.get('success') is True:
                 logger.info(
-                    f"Rotation swap executed: sn{rotationTrade['origin_netuid']} -> sn{rotationTrade['destination_netuid']} | "
-                    f"{rotationTrade['rotation_reason']}"
+                    f"Rotation swap executed: sn{active_trade['origin_netuid']} -> sn{active_trade['destination_netuid']} | "
+                    f"{active_trade['rotation_reason']}"
                 )
-                record_rotation_fill()
+                record_rotation_fill(active_trade)
                 return True
             swap_result_text = str(swap_result)
-            if rotationTrade['mev_protection'] and self._mev_rotation_outcome_failed(swap_result_text):
+            if active_trade['mev_protection'] and self._mev_rotation_outcome_failed(swap_result_text):
                 logger.warning(
-                    f"Shielded rotation outcome unavailable for sn{rotationTrade['origin_netuid']} -> "
-                    f"sn{rotationTrade['destination_netuid']}; retrying without MEV protection"
+                    f"Shielded rotation outcome unavailable for sn{active_trade['origin_netuid']} -> "
+                    f"sn{active_trade['destination_netuid']}; retrying without MEV protection"
                 )
-                retry_result = await submit_rotation(False)
+                retry_result = await submit_rotation(active_trade, False)
                 if retry_result is True or retry_result.__dict__.get('success') is True:
                     logger.info(
-                        f"Rotation swap executed without MEV fallback: sn{rotationTrade['origin_netuid']} -> "
-                        f"sn{rotationTrade['destination_netuid']} | {rotationTrade['rotation_reason']}"
+                        f"Rotation swap executed without MEV fallback: sn{active_trade['origin_netuid']} -> "
+                        f"sn{active_trade['destination_netuid']} | {active_trade['rotation_reason']}"
                     )
-                    record_rotation_fill()
+                    record_rotation_fill(active_trade)
                     return True
                 swap_result = retry_result
                 swap_result_text = str(retry_result)
+
             block_reason = self._extract_execution_block_reason(swap_result_text)
+            if block_reason == 'ZeroMaxStakeAmount':
+                for scale in (0.5, 0.25, 0.1):
+                    resized_trade = self._scaled_rotation_trade(rotationTrade, scale)
+                    logger.warning(
+                        f"Retrying rotation sn{rotationTrade['origin_netuid']} -> sn{rotationTrade['destination_netuid']} "
+                        f"at {scale:.0%} size after ZeroMaxStakeAmount"
+                    )
+                    retry_result = await submit_rotation(resized_trade, False)
+                    if retry_result is True or retry_result.__dict__.get('success') is True:
+                        logger.info(
+                            f"Rotation swap executed after size backoff: sn{resized_trade['origin_netuid']} -> "
+                            f"sn{resized_trade['destination_netuid']} | {resized_trade['rotation_reason']}"
+                        )
+                        record_rotation_fill(resized_trade)
+                        return True
+                    swap_result = retry_result
+                    swap_result_text = str(retry_result)
+                    block_reason = self._extract_execution_block_reason(swap_result_text)
+                    if block_reason != 'ZeroMaxStakeAmount':
+                        break
+
             if block_reason:
-                self._block_subnet_execution(rotationTrade['destination_netuid'], block_reason)
-            logger.info(f"Failed rotation swap {rotationTrade} ({str(swap_result)})")
+                self._block_subnet_execution(active_trade['destination_netuid'], block_reason)
+            logger.info(f"Failed rotation swap {active_trade} ({str(swap_result)})")
             return False
         except asyncio.TimeoutError:
             msg = (
-                f"Timeout rotating stake from sn{rotationTrade['origin_netuid']} "
-                f"to sn{rotationTrade['destination_netuid']} after 60s"
+                f"Timeout rotating stake from sn{active_trade['origin_netuid']} "
+                f"to sn{active_trade['destination_netuid']} after 60s"
             )
             print(msg)
             logger.error(msg)
@@ -1380,8 +1424,8 @@ class BittensorUtility():
             print('ERROR rotating')
             logger.error(traceback.format_exc())
             logger.error(
-                f"Failed to rotate from sn{rotationTrade['origin_netuid']} "
-                f"to sn{rotationTrade['destination_netuid']}: {e}"
+                f"Failed to rotate from sn{active_trade['origin_netuid']} "
+                f"to sn{active_trade['destination_netuid']}: {e}"
             )
             raise
 
