@@ -945,10 +945,9 @@ class BittensorUtility():
 
 
     def _has_rotation_fee_buffer(self):
-        required_fee_buffer = max(
-            self._execution_fee_buffer_tao(),
-            self._rotation_extrinsic_fee_buffer_tao(),
-        )
+        # Rotation can free capital, so it should only require enough liquid TAO
+        # to pay the rotation-side extrinsic fees, not the full idle buy reserve.
+        required_fee_buffer = self._rotation_extrinsic_fee_buffer_tao()
         return float(self.balance) >= required_fee_buffer
 
 
@@ -1102,6 +1101,15 @@ class BittensorUtility():
                 logger.info(f'''Want to buy sn{subnet_netuid} at price {self.stats[subnet_netuid]['price']} because it's lower than my threshold: {buy_threshold}, currently have {current_stake_amt} alpha in it''')
 
             tao_amount = self.determineTokenBuyAmount(max_tao_per_buy, self.stats[subnet_netuid]['tao_in'], max_slippage)
+            min_new_position_tao = float(getattr(bagbot_settings, 'MIN_TAO_PER_NEW_POSITION', 0.0) or 0.0)
+            if current_stake_amt <= 0 and tao_amount < min_new_position_tao:
+                if not preview_only:
+                    logger.info(
+                        f'Skipping new position in sn{subnet_netuid}: '
+                        f'calculated buy size {tao_amount:.6f} TAO is below '
+                        f'MIN_TAO_PER_NEW_POSITION={min_new_position_tao:.6f}'
+                    )
+                return None
             slippage = self.determineSlippage(tao_amount, self.stats[subnet_netuid]['tao_in'])
             if self._slippage_exceeds_limit(slippage, max_slippage):
                 raise Exception(f'Stopping before purchasing too much slippage: {Decimal(slippage)}, max slippage per buy/sell: {Decimal(max_slippage)}.  \nTO FIX: increase the max_tao_per_buy variable or increase max_slippage_percent_per_buy')

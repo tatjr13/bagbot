@@ -10,6 +10,7 @@ WALLET_NAME = 'bagbot' #The name of the wallet created in btcli
 # Note: LOWER THAN 0.01 MAY CAUSE THE BUYS TO FAIL WHILE STILL TAKING THE GAS FEE
 MAX_TAO_PER_BUY = 0.02 #May increase as desired, I wouldnt reduce it.
 MAX_TAO_PER_SELL = 0.02 #May increase as desired, I wouldnt reduce it
+MIN_TAO_PER_NEW_POSITION = 0.0 #Optional minimum TAO size required to open a brand new subnet position
 MAX_SLIPPAGE_PERCENT_PER_BUY = 0.2 #If over this slippage %, buy trades won't execute.
 MAX_SUBNET_ALLOCATION_RATIO = None #Optional cap on single-subnet exposure as a fraction of total portfolio value
 IGNORE_NON_CONFIGURED_STAKE_BELOW_TAO = 0.01 #Ignore tiny legacy stake on alternate validators below this TAO value

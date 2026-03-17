@@ -20,6 +20,7 @@ class TestBAGBot(unittest.TestCase):
         # Pin globals to known defaults so tests pass regardless of overrides file
         bagbot.bagbot_settings.MAX_TAO_PER_BUY = 0.02
         bagbot.bagbot_settings.MAX_TAO_PER_SELL = 0.02
+        bagbot.bagbot_settings.MIN_TAO_PER_NEW_POSITION = 0.0
         bagbot.bagbot_settings.MAX_SLIPPAGE_PERCENT_PER_BUY = 0.2
         bagbot.bagbot_settings.BUY_ZONE_POWER = 1.0
         bagbot.bagbot_settings.SELL_ZONE_POWER = 1.0
@@ -335,6 +336,21 @@ class TestBAGBot(unittest.TestCase):
         buyDict = bu.constructBuy(90)
         self.assertTrue(math.isclose(float(buyDict['tao_amount']), 1.0, rel_tol=1e-6))
 
+    def testBuySkipsTinyNewPositionBelowMinimum(self):
+        args = {}
+        bagbot.bagbot_settings.MAX_TAO_PER_BUY = None
+        bagbot.bagbot_settings.EXECUTION_FEE_BUFFER_TAO = 0.005
+        bagbot.bagbot_settings.MIN_TAO_PER_NEW_POSITION = 0.05
+        bu = bagbot.BittensorUtility(args)
+        bu.stats = {90: {'price': 0.01, 'tao_in': 10000}}
+        bu.balance = 0.02
+        bu.subnet_grids = {90: {'buy_upper': 0.02,
+                                'sell_lower': 0.03,
+                                'max_alpha': 3000,
+                           }}
+        buyDict = bu.constructBuy(90)
+        self.assertIsNone(buyDict)
+
     def testBuyBlockedBySubnetAllocationCap(self):
         args = {}
         bagbot.bagbot_settings.MAX_TAO_PER_BUY = None
@@ -524,6 +540,49 @@ class TestBAGBot(unittest.TestCase):
 
         rotationTrade = bagbot.asyncio.run(bu.constructRotationTrade())
         self.assertIsNone(rotationTrade)
+
+    def testRotationTradeUsesRotationFeeBufferNotBuyReserve(self):
+        args = {}
+        bagbot.bagbot_settings.ENABLE_POSITION_ROTATION = True
+        bagbot.bagbot_settings.ENABLE_ATOMIC_ROTATION = True
+        bagbot.bagbot_settings.EXECUTION_FEE_BUFFER_TAO = 0.005
+        bagbot.bagbot_settings.ROTATION_EXTRINSIC_FEE_BUFFER_TAO = 0.002
+        bagbot.bagbot_settings.MAX_PORTFOLIO_TAO = None
+        bagbot.bagbot_settings.MAX_TAO_PER_BUY = 0.05
+        bagbot.bagbot_settings.MAX_TAO_PER_SELL = 1.0
+        bu = bagbot.BittensorUtility(args)
+        bu.balance = 0.004849
+        bu.stats = {
+            90: {'price': 0.009, 'tao_in': 10000, 'alpha_in': 10000},
+            91: {'price': 0.010, 'tao_in': 10000, 'alpha_in': 10000},
+        }
+        bu.current_stake_info = {
+            bagbot.bagbot_settings.STAKE_ON_VALIDATOR: {
+                91: MockStake(100),
+            }
+        }
+        bu.subnet_grids = {
+            90: {
+                'buy_lower': 0.0105,
+                'buy_upper': 0.011,
+                'sell_lower': 0.013,
+                'sell_upper': 0.014,
+                'max_alpha': 1000,
+            },
+            91: {
+                'buy_lower': 0.008,
+                'buy_upper': 0.009,
+                'sell_lower': 0.012,
+                'sell_upper': 0.013,
+                'max_alpha': 1000,
+            },
+        }
+        bu.sub = StubSub(MockSimSwapResult(dest_netuid=90))
+
+        rotationTrade = bagbot.asyncio.run(bu.constructRotationTrade())
+        self.assertIsNotNone(rotationTrade)
+        self.assertEqual(rotationTrade['origin_netuid'], 91)
+        self.assertEqual(rotationTrade['destination_netuid'], 90)
 
     def testRotationTradeSkipsBlockedTarget(self):
         args = {}

@@ -23,6 +23,7 @@ ROTATION_EXTRINSIC_FEE_BUFFER_TAO = 0.002
 # Use the full bankroll when the signal is strong enough; slippage rules still cap trade size.
 MAX_TAO_PER_BUY = None
 MAX_TAO_PER_SELL = None
+MIN_TAO_PER_NEW_POSITION = 0.05
 MAX_SLIPPAGE_PERCENT_PER_BUY = 0.5
 
 BUY_ZONE_POWER = 1.2
