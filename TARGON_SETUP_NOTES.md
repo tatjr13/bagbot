@@ -47,6 +47,9 @@ This file captures the current live Bagbot/Arbos operating model and the Targon 
 - Rapid operator messages are batched for a short debounce window before the bot replies
 - Operator replies use a calmer status + final-answer pattern instead of constant token-stream edits
 - Autonomous step status edits are throttled more heavily so the chat is less jumpy during normal operation
+- Autonomous background steps now reuse a single rolling Telegram status message instead of creating a fresh message every step
+- Background step updates are status-only digests; raw autonomous rollouts are kept in `context/runs/` and are not pushed into Telegram chat
+- Autonomous step spam is excluded from the operator-context chatlog so old menu loops do not pollute later operator replies
 - Because Arbos is cloned from its own upstream repo at deploy time, this Telegram UX patch should be treated as a Targon runtime customization unless it is upstreamed separately
 
 ## Wallet Notes
