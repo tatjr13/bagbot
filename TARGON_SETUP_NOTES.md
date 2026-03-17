@@ -18,6 +18,7 @@ This file captures the current live Bagbot/Arbos operating model and the Targon 
 - Canary/live settings template: `bagbot_settings_falcon_5tao.py`
 - Live runtime overrides on Targon: `/data/bagbot/bagbot_settings_overrides.py`
 - Brains prompt: `Brains/arbos/PROMPT.md`
+- Canonical Falcon mission file: `Brains/arbos/FALCON_GOAL.md`
 - Arbos live goal file on Targon: `/data/bagbot-arbos/Arbos/context/GOAL.md`
 - Brains config: `Brains/config/threshold_farm.yaml`
 - Brains threshold logic: `Brains/threshold_farm.py`
@@ -93,5 +94,6 @@ tail -n 100 /data/bagbot/staking.log
 - Keep `/data/bagbot/bagbot_settings_overrides.py` and any password files at `600`
 - Treat Taostats as read-only research input
 - Prefer the local replay harness and SQLite state before spending additional Chutes calls; once the account rolls into pay-as-you-go, local evaluation is the cheapest first pass
+- Falcon's standing mission is not just live trading; it also includes hourly universe sweeps, champion-vs-challenger research, and replay-backed improvement work during quiet market periods
 - Current Arbos Chutes routing is a frontier pool centered on `openai/gpt-oss-120b-TEE` with `MiniMax-M2.5-TEE`, `DeepSeek-V3.1-TEE`, and `Kimi-K2.5-TEE` as explicit fallbacks
 - Do not add any workflow that transfers funds or uses a second wallet without explicit operator approval
