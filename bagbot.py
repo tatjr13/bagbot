@@ -906,6 +906,14 @@ class BittensorUtility():
         )
 
 
+    def _transaction_outdated(self, result_text):
+        lowered = result_text.lower()
+        return (
+            'transaction is outdated' in lowered
+            or 'invalid transaction' in lowered and 'outdated' in lowered
+        )
+
+
     def _rotation_extrinsic_fee_buffer_tao(self):
         return float(getattr(bagbot_settings, 'ROTATION_EXTRINSIC_FEE_BUFFER_TAO', 0.0002) or 0.0002)
 
@@ -1369,7 +1377,10 @@ class BittensorUtility():
                 record_rotation_fill(active_trade)
                 return True
             swap_result_text = str(swap_result)
-            if active_trade['mev_protection'] and self._mev_rotation_outcome_failed(swap_result_text):
+            if active_trade['mev_protection'] and (
+                self._mev_rotation_outcome_failed(swap_result_text)
+                or self._transaction_outdated(swap_result_text)
+            ):
                 logger.warning(
                     f"Shielded rotation outcome unavailable for sn{active_trade['origin_netuid']} -> "
                     f"sn{active_trade['destination_netuid']}; retrying without MEV protection"

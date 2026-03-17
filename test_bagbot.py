@@ -648,6 +648,40 @@ class TestBAGBot(unittest.TestCase):
         self.assertAlmostEqual(float(bu.sub.calls[1]['amount']), 50.0)
         self.assertFalse(bu.sub.calls[1]['mev_protection'])
 
+    def testExecuteRotationTradeFallsBackWithoutMevOnOutdatedTransaction(self):
+        args = {}
+        bagbot.bagbot_settings.ENABLE_MEV_PROTECTION = True
+        bu = bagbot.BittensorUtility(args)
+        bu.wallet = object()
+        bu.stats = {
+            38: {'price': 0.012},
+            62: {'price': 0.039},
+        }
+        bu.sub = CaptureSwapStakeSub([
+            MockExtrinsicResponse(False, "Subtensor returned `SubstrateRequestException(Invalid Transaction)` error. This means: `Transaction is outdated`."),
+            MockExtrinsicResponse(True, "success"),
+        ])
+
+        rotationTrade = {
+            'hotkey': 'somehotkey',
+            'origin_netuid': 38,
+            'destination_netuid': 62,
+            'alpha_amount': bagbot.bt.utils.balance.tao(100.0, 38),
+            'approx_tao': 1.2,
+            'max_slippage': 0.005,
+            'rotation_reason': 'test-rotation',
+            'net_edge_pct': 0.08,
+            'estimated_fee_tao': 0.001,
+            'simulated_destination_alpha': 30.0,
+            'mev_protection': True,
+        }
+
+        result = bagbot.asyncio.run(bu.execute_rotation_trade(rotationTrade))
+        self.assertTrue(result)
+        self.assertEqual(len(bu.sub.calls), 2)
+        self.assertTrue(bu.sub.calls[0]['mev_protection'])
+        self.assertFalse(bu.sub.calls[1]['mev_protection'])
+
     def testDoAvailableTradesSkipsBlockedSubnet(self):
         args = {}
         bu = bagbot.BittensorUtility(args)
