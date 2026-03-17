@@ -2,7 +2,7 @@ import unittest
 import bagbot
 import math
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 
@@ -487,6 +487,44 @@ class TestBAGBot(unittest.TestCase):
         rotationTrade = bagbot.asyncio.run(bu.constructRotationTrade())
         self.assertIsNone(rotationTrade)
 
+    def testRotationTradeSkippedWithoutEnoughLiquidFeeBuffer(self):
+        args = {}
+        bagbot.bagbot_settings.ENABLE_POSITION_ROTATION = True
+        bagbot.bagbot_settings.ENABLE_ATOMIC_ROTATION = True
+        bagbot.bagbot_settings.EXECUTION_FEE_BUFFER_TAO = 0.005
+        bagbot.bagbot_settings.ROTATION_EXTRINSIC_FEE_BUFFER_TAO = 0.002
+        bu = bagbot.BittensorUtility(args)
+        bu.balance = 0.001
+        bu.stats = {
+            90: {'price': 0.009, 'tao_in': 10000, 'alpha_in': 10000},
+            91: {'price': 0.010, 'tao_in': 10000, 'alpha_in': 10000},
+        }
+        bu.current_stake_info = {
+            bagbot.bagbot_settings.STAKE_ON_VALIDATOR: {
+                91: MockStake(100),
+            }
+        }
+        bu.subnet_grids = {
+            90: {
+                'buy_lower': 0.0105,
+                'buy_upper': 0.011,
+                'sell_lower': 0.013,
+                'sell_upper': 0.014,
+                'max_alpha': 1000,
+            },
+            91: {
+                'buy_lower': 0.008,
+                'buy_upper': 0.009,
+                'sell_lower': 0.012,
+                'sell_upper': 0.013,
+                'max_alpha': 1000,
+            },
+        }
+        bu.sub = StubSub(MockSimSwapResult(dest_netuid=90))
+
+        rotationTrade = bagbot.asyncio.run(bu.constructRotationTrade())
+        self.assertIsNone(rotationTrade)
+
     def testRotationTradeSkipsBlockedTarget(self):
         args = {}
         bagbot.bagbot_settings.ENABLE_POSITION_ROTATION = True
@@ -682,6 +720,63 @@ class TestBAGBot(unittest.TestCase):
         self.assertTrue(bu.sub.calls[0]['mev_protection'])
         self.assertFalse(bu.sub.calls[1]['mev_protection'])
 
+    def testExecuteRotationTradeFallsBackToExplicitSellThenBuy(self):
+        args = {}
+        bagbot.bagbot_settings.ENABLE_MEV_PROTECTION = True
+        bu = bagbot.BittensorUtility(args)
+        bu.wallet = object()
+        bu.stats = {
+            38: {'price': 0.012, 'tao_in': 10000, 'alpha_in': 10000},
+            62: {'price': 0.039, 'tao_in': 10000, 'alpha_in': 10000},
+        }
+        bu.sub = CaptureSwapStakeSub([
+            MockExtrinsicResponse(False, "Subtensor returned `SubstrateRequestException(Invalid Transaction)` error. This means: `Transaction is outdated`."),
+            MockExtrinsicResponse(False, "Subtensor returned `SubstrateRequestException(Invalid Transaction)` error. This means: `Transaction is outdated`."),
+        ])
+
+        rotationTrade = {
+            'hotkey': 'somehotkey',
+            'origin_netuid': 38,
+            'destination_netuid': 62,
+            'alpha_amount': bagbot.bt.utils.balance.tao(100.0, 38),
+            'approx_tao': 1.2,
+            'max_slippage': 0.005,
+            'rotation_reason': 'test-rotation',
+            'net_edge_pct': 0.08,
+            'estimated_fee_tao': 0.001,
+            'simulated_destination_alpha': 30.0,
+            'mev_protection': True,
+        }
+        sellTrade = {
+            'hotkey': 'somehotkey',
+            'netuid': 38,
+            'alpha_amount': bagbot.bt.utils.balance.tao(30.0, 38),
+            'max_slippage': 0.005,
+            'sell_threshold': 0.04,
+            'approx_tao': 1.2,
+        }
+        buyTrade = {
+            'hotkey': 'somehotkey',
+            'netuid': 62,
+            'tao_amount': bagbot.bt.utils.balance.tao(1.0),
+            'buy_threshold': 0.02,
+            'max_slippage': 0.005,
+        }
+
+        with patch.object(bu, 'constructSell', return_value=sellTrade) as mock_construct_sell, \
+             patch.object(bu, 'execute_sell_trade', new=AsyncMock(return_value=True)) as mock_execute_sell, \
+             patch.object(bu, '_refresh_runtime_market_state', new=AsyncMock()) as mock_refresh_state, \
+             patch.object(bu, 'constructBuy', return_value=buyTrade) as mock_construct_buy, \
+             patch.object(bu, 'execute_buy_trade', new=AsyncMock(return_value=True)) as mock_execute_buy:
+            result = bagbot.asyncio.run(bu.execute_rotation_trade(rotationTrade))
+
+        self.assertTrue(result)
+        mock_construct_sell.assert_called_once()
+        mock_execute_sell.assert_awaited_once()
+        mock_refresh_state.assert_awaited_once()
+        mock_construct_buy.assert_called_once_with(62)
+        mock_execute_buy.assert_awaited_once_with(buyTrade)
+
     def testDoAvailableTradesSkipsBlockedSubnet(self):
         args = {}
         bu = bagbot.BittensorUtility(args)
@@ -697,6 +792,96 @@ class TestBAGBot(unittest.TestCase):
 
         bagbot.asyncio.run(bu.do_available_trades(90))
         self.assertEqual(bu.sub.calls, [])
+
+    def testDoAvailableTradesStopsAfterSuccessfulBuy(self):
+        args = {}
+        bu = bagbot.BittensorUtility(args)
+        bu.balance = 1.0
+        bu.stats = {90: {'price': 0.01, 'tao_in': 10000, 'alpha_in': 10000}}
+        bu.subnet_grids = {90: {'buy_upper': 0.02, 'sell_lower': 0.03, 'max_alpha': 3000}}
+        buyTrade = {'hotkey': 'somehotkey', 'netuid': 90, 'tao_amount': bagbot.bt.utils.balance.tao(0.1), 'max_slippage': 0.005}
+
+        with patch.object(bu, 'constructBuy', return_value=buyTrade), \
+             patch.object(bu, 'execute_buy_trade', new=AsyncMock(return_value=True)) as mock_execute_buy, \
+             patch.object(bu, 'constructSell', side_effect=AssertionError('sell should not be evaluated after a successful buy')):
+            result = bagbot.asyncio.run(bu.do_available_trades(90))
+
+        self.assertEqual(result, {'buy_executed': True, 'sell_executed': False})
+        mock_execute_buy.assert_awaited_once_with(buyTrade)
+
+    def testRunPrefersSpendableBuysBeforeRotation(self):
+        class StopRun(Exception):
+            pass
+
+        args = bagbot.SimpleNamespace(nocheck=True)
+        bu = bagbot.BittensorUtility(args)
+        bu.balance = 1.0
+        bu.stats = {90: {'price': 0.01, 'tao_in': 10000, 'alpha_in': 10000}}
+        bu.current_stake_info = {'somehotkey': {}}
+        bu.subnet_grids = {
+            90: {'buy_upper': 0.02, 'sell_lower': 0.03, 'max_alpha': 3000},
+        }
+        bu.static_subnet_grids = dict(bu.subnet_grids)
+        bu.sub = CloseOnlySub()
+        call_order = []
+
+        async def fake_do_available_trades(netuid):
+            call_order.append(('spot', netuid))
+            raise StopRun()
+
+        async def fake_construct_rotation_trade():
+            call_order.append(('rotation', None))
+            return None
+
+        with patch.object(bu, 'setup', new=AsyncMock()), \
+             patch.object(bu, 'refresh_subnet_grid', new=AsyncMock()), \
+             patch.object(bu, 'discover_all_validators_with_stake', new=AsyncMock(return_value=None)), \
+             patch.object(bu, 'refresh_stats', new=AsyncMock()), \
+             patch.object(bu, 'do_available_trades', side_effect=fake_do_available_trades), \
+             patch.object(bu, 'constructRotationTrade', side_effect=fake_construct_rotation_trade), \
+             patch.object(bagbot.printHelpers, 'print_table_rich'), \
+             patch.object(bagbot, 'print_link'):
+            with self.assertRaises(StopRun):
+                bagbot.asyncio.run(bu.run())
+
+        self.assertEqual(call_order, [('spot', 90)])
+
+    def testRunStopsScanningAfterFirstSuccessfulBuy(self):
+        class StopRun(Exception):
+            pass
+
+        args = bagbot.SimpleNamespace(nocheck=True)
+        bu = bagbot.BittensorUtility(args)
+        bu.balance = 1.0
+        bu.stats = {
+            90: {'price': 0.01, 'tao_in': 10000, 'alpha_in': 10000},
+            91: {'price': 0.01, 'tao_in': 10000, 'alpha_in': 10000},
+        }
+        bu.current_stake_info = {'somehotkey': {}}
+        bu.subnet_grids = {
+            90: {'buy_upper': 0.02, 'sell_lower': 0.03, 'max_alpha': 3000},
+            91: {'buy_upper': 0.02, 'sell_lower': 0.03, 'max_alpha': 3000},
+        }
+        bu.static_subnet_grids = dict(bu.subnet_grids)
+        bu.sub = WaitStopSub(StopRun)
+        call_order = []
+
+        async def fake_do_available_trades(netuid):
+            call_order.append(netuid)
+            return {'buy_executed': netuid == 90, 'sell_executed': False}
+
+        with patch.object(bu, 'setup', new=AsyncMock()), \
+             patch.object(bu, 'refresh_subnet_grid', new=AsyncMock()), \
+             patch.object(bu, 'discover_all_validators_with_stake', new=AsyncMock(return_value=None)), \
+             patch.object(bu, 'refresh_stats', new=AsyncMock()), \
+             patch.object(bu, 'do_available_trades', side_effect=fake_do_available_trades), \
+             patch.object(bu, 'constructRotationTrade', new=AsyncMock(return_value=None)), \
+             patch.object(bagbot.printHelpers, 'print_table_rich'), \
+             patch.object(bagbot, 'print_link'):
+            with self.assertRaises(StopRun):
+                bagbot.asyncio.run(bu.run())
+
+        self.assertEqual(call_order, [90])
 
     def testRefreshSubnetGridHotReloadsUpdatedAllowlist(self):
         args = {}
@@ -869,6 +1054,19 @@ class CaptureSwapStakeSub:
         if not self.results:
             return MockExtrinsicResponse(False, 'no result queued')
         return self.results.pop(0)
+
+
+class CloseOnlySub:
+    async def close(self):
+        return None
+
+
+class WaitStopSub(CloseOnlySub):
+    def __init__(self, exc_type):
+        self.exc_type = exc_type
+
+    async def wait_for_block(self):
+        raise self.exc_type()
 
 if __name__ == '__main__':
     unittest.main()

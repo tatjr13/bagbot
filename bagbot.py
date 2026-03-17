@@ -599,12 +599,26 @@ class BittensorUtility():
 
                 print_link(f"https://taoflute.com/d/5c216965-b99b-4d82-8b31-931bb3d71567/subnets-overview?orgId=1&var-target_subnets={allSubnetParams}", 'Taoflute Portfolio link')
                 logger.info(f'Tick {self.tick}: Checking trades')
-                rotationTrade = await self.constructRotationTrade()
-                if rotationTrade:
-                    await self.execute_rotation_trade(rotationTrade)
-                else:
+                cash_buy_available = self._has_spendable_buy_opportunity()
+                if cash_buy_available:
+                    executed_buy = False
                     for subnet_netuid in self.subnet_grids:
-                        await self.do_available_trades(subnet_netuid)
+                        trade_result = await self.do_available_trades(subnet_netuid)
+                        executed_buy = executed_buy or trade_result['buy_executed']
+                        if executed_buy:
+                            break
+
+                    if not executed_buy:
+                        rotationTrade = await self.constructRotationTrade()
+                        if rotationTrade:
+                            await self.execute_rotation_trade(rotationTrade)
+                else:
+                    rotationTrade = await self.constructRotationTrade()
+                    if rotationTrade:
+                        await self.execute_rotation_trade(rotationTrade)
+                    else:
+                        for subnet_netuid in self.subnet_grids:
+                            await self.do_available_trades(subnet_netuid)
 
                 logging.info(f'Finished tick {self.tick} in {time.time() - start:.2f} seconds')
                 #return
@@ -844,6 +858,18 @@ class BittensorUtility():
         return max(0.0, float(self.balance) - tao_reserve - execution_fee_buffer)
 
 
+    def _has_spendable_buy_opportunity(self):
+        if self._available_spendable_balance() < 0.01:
+            return False
+
+        for subnet_netuid in self.subnet_grids:
+            if self._subnet_execution_block_reason(subnet_netuid):
+                continue
+            if self.constructBuy(subnet_netuid, preview_only=True) is not None:
+                return True
+        return False
+
+
     def _max_additional_subnet_allocation(self, subnet_netuid):
         allocation_ratio = getattr(bagbot_settings, 'MAX_SUBNET_ALLOCATION_RATIO', None)
         if allocation_ratio is None:
@@ -916,6 +942,14 @@ class BittensorUtility():
 
     def _rotation_extrinsic_fee_buffer_tao(self):
         return float(getattr(bagbot_settings, 'ROTATION_EXTRINSIC_FEE_BUFFER_TAO', 0.0002) or 0.0002)
+
+
+    def _has_rotation_fee_buffer(self):
+        required_fee_buffer = max(
+            self._execution_fee_buffer_tao(),
+            self._rotation_extrinsic_fee_buffer_tao(),
+        )
+        return float(self.balance) >= required_fee_buffer
 
 
     def _scaled_rotation_trade(self, rotation_trade, scale):
@@ -1129,6 +1163,12 @@ class BittensorUtility():
             return None
         if not getattr(bagbot_settings, 'ENABLE_ATOMIC_ROTATION', True):
             return None
+        if not self._has_rotation_fee_buffer():
+            logger.info(
+                f'Skipping rotation: liquid balance too low for fees '
+                f'(balance={float(self.balance):.6f}, required={max(self._execution_fee_buffer_tao(), self._rotation_extrinsic_fee_buffer_tao()):.6f})'
+            )
+            return None
         if getattr(bagbot_settings, 'ROTATION_REQUIRE_CONSTRAINTS', False) and not self._rotation_constraints_active():
             return None
 
@@ -1222,11 +1262,56 @@ class BittensorUtility():
         return best_trade
 
 
+    async def _refresh_runtime_market_state(self):
+        discovered_validators = await self.discover_all_validators_with_stake()
+        all_validators = discovered_validators or self.get_all_validators()
+        await self.refresh_stats(all_validators)
+
+
+    async def _execute_two_step_rotation(self, rotationTrade, failure_reason):
+        logger.warning(
+            f"Atomic rotation fallback engaged for sn{rotationTrade['origin_netuid']} -> "
+            f"sn{rotationTrade['destination_netuid']}: {failure_reason}"
+        )
+        sell_trade = self.constructSell(
+            rotationTrade['origin_netuid'],
+            force_sell=True,
+            desired_tao=rotationTrade['approx_tao'],
+            force_reason=f"{rotationTrade['rotation_reason']}; fallback={failure_reason}",
+        )
+        if sell_trade is None:
+            logger.warning(
+                f"Could not build fallback sell for sn{rotationTrade['origin_netuid']} after "
+                f"failed atomic rotation to sn{rotationTrade['destination_netuid']}"
+            )
+            return False
+
+        sell_ok = await self.execute_sell_trade(sell_trade)
+        if not sell_ok:
+            return False
+
+        await self._refresh_runtime_market_state()
+        if self._subnet_execution_block_reason(rotationTrade['destination_netuid']):
+            logger.warning(
+                f"Destination sn{rotationTrade['destination_netuid']} became blocked before fallback buy"
+            )
+            return False
+
+        buy_trade = self.constructBuy(rotationTrade['destination_netuid'])
+        if buy_trade is None:
+            logger.warning(
+                f"Fallback sell completed, but sn{rotationTrade['destination_netuid']} no longer "
+                f"meets buy criteria after refresh"
+            )
+            return False
+
+        return await self.execute_buy_trade(buy_trade)
+
+
     async def execute_buy_trade(self, buyTrade):
-        try:
-            logger.info(f"Attempting to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']}")
+        async def submit_buy():
             mev_protection = self._mev_enabled()
-            stake_result = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self.sub.add_stake(
                     wallet=self.wallet,
                     hotkey_ss58=buyTrade['hotkey'],
@@ -1242,7 +1327,16 @@ class BittensorUtility():
                 ),
                 timeout=45.0
             )
+
+        try:
+            logger.info(f"Attempting to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']}")
+            stake_result = await submit_buy()
             print(f'after buy {str(buyTrade)}')
+            if self._transaction_outdated(str(stake_result)):
+                logger.warning(
+                    f"Buy extrinsic for sn{buyTrade['netuid']} was outdated; retrying once"
+                )
+                stake_result = await submit_buy()
             if stake_result is True or stake_result.__dict__.get('success') is True:
                 logger.info(f"Staked {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
                 if _strategy_engine is not None:
@@ -1256,24 +1350,27 @@ class BittensorUtility():
                         )
                     except Exception as e:
                         logger.error(f'Brains on_fill error (buy): {e}')
+                return True
             else:
                 block_reason = self._extract_execution_block_reason(str(stake_result))
                 if block_reason:
                     self._block_subnet_execution(buyTrade['netuid'], block_reason)
                 logger.info(f"Failed to stake {float(buyTrade['tao_amount'])} TAO to subnet {buyTrade['netuid']} ({str(stake_result)})")
+                return False
         except asyncio.TimeoutError:
             logger.error(f"Timeout staking on subnet {buyTrade['netuid']} after 45s")
+            return False
         except Exception as e:
             print(f'ERROR staking')
             logger.error(traceback.format_exc())
             logger.error(f"Failed to stake on subnet {buyTrade['netuid']}: {e}")
+            return False
 
 
     async def execute_sell_trade(self, sellTrade):
-        try:
-            logger.info(f"Attempting to unstake {float(sellTrade['alpha_amount'])} alpha from subnet {sellTrade['netuid']}")
+        async def submit_sell():
             mev_protection = self._mev_enabled()
-            unstake_result = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self.sub.unstake(
                     wallet=self.wallet,
                     hotkey_ss58=sellTrade['hotkey'] ,
@@ -1289,7 +1386,16 @@ class BittensorUtility():
                 ),
                 timeout=60.0
             )
+
+        try:
+            logger.info(f"Attempting to unstake {float(sellTrade['alpha_amount'])} alpha from subnet {sellTrade['netuid']}")
+            unstake_result = await submit_sell()
             print(f'after sell {str(sellTrade)}')
+            if self._transaction_outdated(str(unstake_result)):
+                logger.warning(
+                    f"Sell extrinsic for sn{sellTrade['netuid']} was outdated; retrying once"
+                )
+                unstake_result = await submit_sell()
             if unstake_result is True or unstake_result.__dict__.get('success') is True:
                 if sellTrade.get('rotation_reason'):
                     logger.info(f"Rotation exit executed on sn{sellTrade['netuid']}: {sellTrade['rotation_reason']}")
@@ -1304,18 +1410,22 @@ class BittensorUtility():
                         )
                     except Exception as e:
                         logger.error(f'Brains on_fill error (sell): {e}')
+                return True
             else:
                 logger.info(f"Failed to unstake {str(sellTrade)}  sn{sellTrade['netuid']} ({str(unstake_result)})")
+                return False
         except asyncio.TimeoutError:
             msg = f"Timeout unstaking from subnet {sellTrade['netuid']} after 60s"
             print(msg)
             logger.error(msg)
             self.sub = await my_async_subtensor("finney")
+            return False
         except (asyncio.exceptions.CancelledError, asyncio.exceptions.InvalidStateError) as e:
             print(f'ERROR unstaking - {e}... continuing')
             logger.error(traceback.format_exc())
             logger.error(f"Failed to unstake from subnet {sellTrade['netuid']}: {e}")
             self.sub = await my_async_subtensor("finney")
+            return False
         except Exception as e:
             print(f'ERROR unstaking')
             logger.error(traceback.format_exc())
@@ -1420,6 +1530,14 @@ class BittensorUtility():
 
             if block_reason:
                 self._block_subnet_execution(active_trade['destination_netuid'], block_reason)
+            if (
+                self._transaction_outdated(swap_result_text)
+                or block_reason == 'ZeroMaxStakeAmount'
+            ):
+                return await self._execute_two_step_rotation(
+                    active_trade,
+                    failure_reason=block_reason or 'TransactionOutdated',
+                )
             logger.info(f"Failed rotation swap {active_trade} ({str(swap_result)})")
             return False
         except asyncio.TimeoutError:
@@ -1430,7 +1548,7 @@ class BittensorUtility():
             print(msg)
             logger.error(msg)
             self.sub = await my_async_subtensor("finney")
-            return False
+            return await self._execute_two_step_rotation(active_trade, failure_reason='Timeout')
         except Exception as e:
             print('ERROR rotating')
             logger.error(traceback.format_exc())
@@ -1442,15 +1560,27 @@ class BittensorUtility():
 
 
     async def do_available_trades(self, subnet_netuid):
+        buy_executed = False
+        sell_executed = False
         buyTrade = None
         if not self._subnet_execution_block_reason(subnet_netuid):
             buyTrade = self.constructBuy(subnet_netuid)
         if buyTrade:
-            await self.execute_buy_trade(buyTrade)
+            buy_executed = await self.execute_buy_trade(buyTrade)
+            if buy_executed:
+                return {
+                    'buy_executed': True,
+                    'sell_executed': False,
+                }
 
         sellTrade = self.constructSell(subnet_netuid)
         if sellTrade:
-            await self.execute_sell_trade(sellTrade)
+            sell_executed = await self.execute_sell_trade(sellTrade)
+
+        return {
+            'buy_executed': bool(buy_executed),
+            'sell_executed': bool(sell_executed),
+        }
 
 
 if __name__ == "__main__":
