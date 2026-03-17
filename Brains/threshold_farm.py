@@ -23,6 +23,18 @@ def classify_regime(snap: SignalSnapshot) -> str:
     """
     if snap.range_pos_24h > 0.85 and snap.momentum_6h > 0.06:
         return 'pump'
+    if (
+        snap.ema_fast_slow_spread > 0.008
+        and snap.ema_fast_slope_6h > 0.003
+        and snap.spot_price > snap.ema_fast
+    ):
+        return 'bull'
+    if (
+        snap.ema_fast_slow_spread < -0.008
+        and snap.ema_fast_slope_6h < -0.003
+        and snap.spot_price < snap.ema_fast
+    ):
+        return 'bear'
     if snap.ema_slope_24h > 0.01 and snap.spot_price > snap.ema_72h:
         return 'bull'
     if snap.ema_slope_24h < -0.01 and snap.spot_price < snap.ema_72h:
@@ -48,6 +60,8 @@ def compute_signals(
     now = now or time.time()
 
     ema_hours = lookbacks.get('ema_hours', 72)
+    ema_fast_hours = lookbacks.get('ema_fast_hours', 12)
+    ema_fast_slope_hours = lookbacks.get('ema_fast_slope_hours', 6)
     vol_hours = lookbacks.get('vol_hours', 24)
     range_short_h = lookbacks.get('range_short_hours', 24)
     range_med_h = lookbacks.get('range_medium_hours', 72)
@@ -84,9 +98,14 @@ def compute_signals(
     ema_val = signals.ema(ema_prices, ema_span)
     if ema_val is None:
         ema_val = spot_price  # absolute fallback
+    ema_fast_span = max(1, int(ema_fast_hours * bars_per_hour))
+    ema_fast_val = signals.ema(ema_prices, ema_fast_span)
+    if ema_fast_val is None:
+        ema_fast_val = spot_price
 
     # EMA slope lookback in bars (24h)
     slope_lookback = int(24 * bars_per_hour)
+    fast_slope_lookback = max(1, int(ema_fast_slope_hours * bars_per_hour))
 
     return SignalSnapshot(
         netuid=netuid,
@@ -104,6 +123,10 @@ def compute_signals(
         confidence=conf,
         tao_in_pool=tao_in,
         alpha_in_pool=alpha_in,
+        ema_fast=ema_fast_val,
+        ema_fast_distance=signals.ema_distance(spot_price, ema_fast_val),
+        ema_fast_slope_6h=signals.ema_slope(ema_prices, ema_fast_span, fast_slope_lookback),
+        ema_fast_slow_spread=signals.ema_distance(ema_fast_val, ema_val),
     )
 
 
@@ -172,6 +195,30 @@ def compute_thresholds(
         freeze_buys_if_confidence_lt=freeze_buys_confidence,
         de_risk_only_if_confidence_lt=derisk_only_confidence,
     )
+
+    # Dual-timeframe overlay: keep the slow EMA anchor, but react faster when
+    # the short EMA turns up or crosses the slow EMA on discounted names.
+    fast_turn_strength = min(
+        max(snap.ema_fast_slope_6h * 120.0, 0.0)
+        + max(snap.ema_fast_slow_spread * 50.0, 0.0),
+        1.0,
+    )
+    fast_headwind_strength = min(
+        max(-snap.ema_fast_slope_6h * 120.0, 0.0)
+        + max(-snap.ema_fast_slow_spread * 50.0, 0.0),
+        1.0,
+    )
+    discounted_slow_anchor = max(0.0, min(-snap.ema_distance, 0.08))
+    flip_signal = min(fast_turn_strength * (0.5 + discounted_slow_anchor * 6.0), 1.0)
+
+    buy_low_off += min(0.0035, 0.0035 * flip_signal)
+    buy_high_off += min(0.0025, 0.0025 * flip_signal)
+    sell_low_off += min(0.0030, 0.0020 * flip_signal)
+    sell_high_off += min(0.0040, 0.0030 * flip_signal)
+
+    if snap.inventory_ratio > 0.0 and fast_headwind_strength > 0.0:
+        sell_low_off -= min(0.0020, 0.0020 * fast_headwind_strength)
+        sell_high_off -= min(0.0030, 0.0030 * fast_headwind_strength)
 
     # Compute dynamic edge
     min_edge_cfg = cfg.get('min_roundtrip_edge_pct', 0.02)
@@ -252,6 +299,10 @@ def compute_thresholds(
         reasons.append(f'high_slip={snap.est_slippage_pct:.2f}%')
     if cost_floor > 0:
         reasons.append(f'cost_floor={cost_floor:.6f}')
+    if flip_signal > 0.10:
+        reasons.append(f'fast_flip={flip_signal:.2f}')
+    if fast_headwind_strength > 0.20:
+        reasons.append(f'fast_headwind={fast_headwind_strength:.2f}')
 
     patch = ThresholdPatch(
         netuid=snap.netuid,

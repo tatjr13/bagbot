@@ -972,6 +972,29 @@ class BittensorUtility():
         return scaled_trade
 
 
+    def _rotation_near_miss_log_limit(self):
+        raw_limit = getattr(bagbot_settings, 'ROTATION_NEAR_MISS_LOG_LIMIT', 3)
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 3
+        return max(0, limit)
+
+
+    def _log_rotation_near_misses(self, near_misses):
+        limit = self._rotation_near_miss_log_limit()
+        if limit <= 0 or not near_misses:
+            return
+
+        ranked = sorted(
+            near_misses,
+            key=lambda miss: (miss['priority'], miss['closeness']),
+            reverse=True,
+        )[:limit]
+        summary = '; '.join(miss['message'] for miss in ranked)
+        logger.info(f'No qualifying rotation candidate. Near misses: {summary}')
+
+
     def _limit_or_unbounded(self, raw_limit):
         if raw_limit is None:
             return float('inf')
@@ -1186,8 +1209,23 @@ class BittensorUtility():
         extrinsic_fee_buffer_tao = self._rotation_extrinsic_fee_buffer_tao()
 
         best_trade = None
+        near_misses = []
+
+        def remember_near_miss(priority, closeness, message):
+            near_misses.append({
+                'priority': float(priority),
+                'closeness': max(0.0, float(closeness)),
+                'message': message,
+            })
+
         for target_netuid in self.subnet_grids:
-            if self._subnet_execution_block_reason(target_netuid):
+            blocked_reason = self._subnet_execution_block_reason(target_netuid)
+            if blocked_reason:
+                remember_near_miss(
+                    priority=0.5,
+                    closeness=0.0,
+                    message=f'sn{target_netuid} blocked ({blocked_reason})',
+                )
                 continue
             buy_trade = self.constructBuy(target_netuid, ignore_balance_limits=True, preview_only=True)
             if buy_trade is None:
@@ -1199,6 +1237,15 @@ class BittensorUtility():
 
             discount_pct = max(0.0, (buy_threshold - self.stats[target_netuid]['price']) / buy_threshold)
             if discount_pct < target_discount_floor:
+                closeness = discount_pct / target_discount_floor if target_discount_floor > 0 else 0.0
+                remember_near_miss(
+                    priority=1.0,
+                    closeness=closeness,
+                    message=(
+                        f'sn{target_netuid} target_discount {discount_pct:.2%} < '
+                        f'{target_discount_floor:.2%}'
+                    ),
+                )
                 continue
 
             desired_tao = float(buy_trade['tao_amount'])
@@ -1223,9 +1270,30 @@ class BittensorUtility():
 
                 weakness_pct = max(0.0, (sell_threshold - self.stats[source_netuid]['price']) / sell_threshold)
                 if weakness_pct < source_weakness_floor:
+                    closeness = weakness_pct / source_weakness_floor if source_weakness_floor > 0 else 0.0
+                    remember_near_miss(
+                        priority=2.0,
+                        closeness=closeness,
+                        message=(
+                            f'sn{source_netuid}->sn{target_netuid} source_weakness {weakness_pct:.2%} < '
+                            f'{source_weakness_floor:.2%} (target_discount={discount_pct:.2%})'
+                        ),
+                    )
                     continue
 
                 if sell_trade['hotkey'] != buy_trade['hotkey']:
+                    closeness = min(
+                        discount_pct / target_discount_floor if target_discount_floor > 0 else 1.0,
+                        weakness_pct / source_weakness_floor if source_weakness_floor > 0 else 1.0,
+                    )
+                    remember_near_miss(
+                        priority=2.5,
+                        closeness=closeness,
+                        message=(
+                            f'sn{source_netuid}->sn{target_netuid} hotkey mismatch '
+                            f'({sell_trade["hotkey"]} != {buy_trade["hotkey"]})'
+                        ),
+                    )
                     continue
 
                 sim_result = await self.sub.sim_swap(
@@ -1240,6 +1308,16 @@ class BittensorUtility():
                 fee_drag_pct = estimated_total_fee_tao / sell_trade['approx_tao'] if sell_trade['approx_tao'] > 0 else 1.0
                 net_edge_pct = gross_edge_pct - fee_drag_pct
                 if net_edge_pct < min_net_edge_pct:
+                    closeness = net_edge_pct / min_net_edge_pct if min_net_edge_pct > 0 else 0.0
+                    remember_near_miss(
+                        priority=3.0,
+                        closeness=closeness,
+                        message=(
+                            f'sn{source_netuid}->sn{target_netuid} net_edge {net_edge_pct:.2%} < '
+                            f'{min_net_edge_pct:.2%} (discount={discount_pct:.2%}, '
+                            f'weakness={weakness_pct:.2%}, fee_drag={fee_drag_pct:.2%})'
+                        ),
+                    )
                     continue
 
                 if best_trade is None or net_edge_pct > best_trade['net_edge_pct']:
@@ -1267,6 +1345,8 @@ class BittensorUtility():
                         'mev_protection': self._mev_enabled(),
                     }
 
+        if best_trade is None:
+            self._log_rotation_near_misses(near_misses)
         return best_trade
 
 

@@ -40,6 +40,9 @@ Treat this as a constrained trading challenge:
 - `sqlite3 Brains/price_history.db "SELECT * FROM fills ORDER BY timestamp DESC LIMIT 20"` — recent trade fills
 - `python Brains/research_harness.py --hours 168 --config Brains/config/threshold_farm.yaml` — offline replay score for the current config
 - `python Brains/taostats_api.py /api/stats/latest/v1` — read-only Taostats API access
+- `python Brains/wallet_tracker.py refresh --no-desktop-output` — refresh the wallet-intel report; keep it roughly hourly unless a market move justifies a forced refresh
+- `cat Brains/arbos/WALLET_TRACKERS.md` — generated public-wallet intel report for local Bagbot runs; mirrored as `context/WALLET_TRACKERS.md` in the live Arbos runtime
+- `cat Brains/arbos/ARBOS_STATUS.md` — operator-facing structured status summary; mirrored as `context/ARBOS_STATUS.md` in the live Arbos runtime
 - `tail -100 staking.log | grep Brains` — recent Brains log entries
 - `grep 'wallet_value:\"' staking.log | tail -n 5` — recent live portfolio snapshots
 - `grep 'Brains runtime roster refreshed:' staking.log | tail -n 5` — latest live roster, buy-enabled list, and exit-only names
@@ -50,6 +53,9 @@ Treat this as a constrained trading challenge:
 ### Secondary Mission When Markets Are Quiet
 - Start every quiet-cycle analysis by writing down the **current live holdings and current live roster**. If you cannot establish the real book from logs/state, do not invent one
 - Sweep the full observed subnet universe at least once per hour and refresh a ranked watchlist of possible entrants, exits, and breakouts
+- Review the tracked public-wallet watchlist during quiet cycles. Look for early accumulation, fresh subnet entries, and repeated timing edges, but do not mirror a wallet blindly
+- Keep the wallet-intel report fresh. Refresh it during quiet cycles, but respect the hourly cadence unless a major market move or suspected announcement justifies a forced refresh
+- Do second-order wallet research: if a tracked wallet moved early, look for the wallets that accumulated before it and test whether those precursor wallets repeatedly lead later signal wallets or announcements
 - Maintain a small champion-vs-challenger queue: one incumbent live config and up to three challenger ideas worth testing
 - Turn quiet time into concrete outputs. Every quiet cycle should produce at least one of:
   - an updated ranked watchlist
@@ -58,6 +64,7 @@ Treat this as a constrained trading challenge:
   - a new hypothesis tied to TAO flow, emissions, liquidity, or validator behavior
 - Use Chutes to synthesize better hypotheses, not to restate logs. Mine intelligence, not chatter
 - Keep the research loop bounded and reusable: prefer durable notes, concrete parameter candidates, and repeatable tests over free-form narrative
+- Keep `context/ARBOS_STATUS.md` current with a concise operator-facing status summary. Do not dump raw chain-of-thought; write only the observable facts, current hypotheses, and next step
 
 ### Grounding Rules
 - Before proposing or applying a change, explicitly anchor to:
@@ -81,6 +88,9 @@ Treat this as a constrained trading challenge:
 - Prefer direct Taostats API reads for chain research before reaching for third-party paid tooling
 - When local bar history is still shallow, use Taostats as supplemental context instead of defaulting to passivity
 - Prefer subnet-level Taostats reads that expose `net_flow_1_day`, `net_flow_7_days`, `net_flow_30_days`, `tao_flow`, and `ema_tao_flow` when deciding whether a subnet has real chain-supported demand behind it
+- Use the wallet watchlist as a read-only clue source. If a tracked wallet appears early in a subnet, test whether price, TAO flow, liquidity, and replay evidence agree before promoting that subnet
+- Ignore likely MEV/sandwich wallets. If the wallet-intel report flags a candidate as likely MEV noise, do not treat it as investable signal unless fresh contrary evidence is strong
+- If a tracked wallet appears useful, investigate the wallets that moved before it. Only elevate a precursor wallet into the watchlist when it shows repeated lead-lag value, not a single coincidence
 - The Chutes account is allowed to roll from the free tier into pay-as-you-go, but do not waste calls on repetitive analysis that the local replay harness or SQLite history can answer
 - If local evidence is already fresh, spend Chutes calls only on higher-order synthesis: challenger generation, postmortems, and cross-subnet pattern discovery
 - Do not use Handshake58, drain-mcp, or any paid information channel unless the operator explicitly authorizes a separate research budget and wallet
@@ -140,6 +150,8 @@ You may improve the strategy using feedback from trading results, but stay withi
 - Detect where chain buy pressure is accelerating before price fully reprices
 - Study whether TAO flow persistence by subnet is predictive across short and medium windows
 - Study which subnet types mean-revert after emission-driven spikes versus those that sustain flow
+- Study whether the tracked public wallets lead major subnet announcements or simply chase already-visible flow
+- Study whether there are reliable precursor wallets that move before the known signal wallets do
 - Look for execution improvements: fee-aware sizing, better rotation timing, reduced failed swaps, lower churn
 - Compare current live holdings against the strongest off-book challengers so weak inventory does not linger by inertia
 

@@ -1,0 +1,111 @@
+{
+  "refresh_minutes": 60,
+  "tracked_event_lookback_hours": 24,
+  "tracked_event_limit": 24,
+  "subnet_event_limit": 120,
+  "precursor_min_lead_minutes": 5,
+  "precursor_max_lead_hours": 24,
+  "candidate_min_amount_tao": 1.0,
+  "max_dynamic_wallets": 8,
+  "max_promoted_wallets_per_cycle": 3,
+  "max_rotating_wallets_per_cycle": 3,
+  "fetch_retry_attempts": 4,
+  "fetch_retry_base_seconds": 15,
+  "promotion": {
+    "min_score": 4.0,
+    "min_lead_count": 2
+  },
+  "mev_filters": {
+    "roundtrip_minutes": 20,
+    "burst_minutes": 60,
+    "burst_count": 4,
+    "max_notional_tao": 2.0,
+    "burst_max_notional_tao": 5.0
+  },
+  "ignored_wallets": [],
+  "wallets": [
+    {
+      "label": "RVCrypto",
+      "handle": "@RVCrypto",
+      "evm": "0x4ae6816269d6bbd5d3456cd46c183136e0447cc725d122655c686bb1f087574b",
+      "ss58": "5Dkushsxtc8AdCf287MtTYHQv9DoZeBRpttUpBtmyFhGy3uR",
+      "tier": "seed",
+      "intel_score": 10.0,
+      "priority": "high",
+      "notes": "Suspected to have seen the AlphaCore move early."
+    },
+    {
+      "label": "Dr Reed",
+      "handle": "@Dr Reed",
+      "ss58": "5EqMhjdLY9h64ui2mizRZyBp1mEPJ7s4TsfAxQSQkAFmMfzE",
+      "tier": "seed",
+      "intel_score": 9.0,
+      "priority": "high",
+      "notes": "Track for repeated early positioning and subnet rotation clues."
+    },
+    {
+      "label": "SN66 Rao Lead 1",
+      "ss58": "5FAKrmRc8u9cP8Fj3BD28A33Bq4DRbfHHeUKM8pXY38KYQhu",
+      "tier": "seed",
+      "intel_score": 6.5,
+      "priority": "medium",
+      "notes": "Shared by Rao during the 2026-03-16 AlphaCore/SN66 announcement window as an early buyer to inspect."
+    },
+    {
+      "label": "SN66 Rao Lead 2",
+      "ss58": "5CPupcqFMZhEVERtg58yHXDoeSyS3TXdKiR653rrZLRq1tqf",
+      "tier": "seed",
+      "intel_score": 6.5,
+      "priority": "medium",
+      "notes": "Shared by Rao during the 2026-03-16 AlphaCore/SN66 announcement window as an early buyer to inspect."
+    },
+    {
+      "label": "SN66 Rao Lead 3",
+      "ss58": "5DAiQoNhyHvQPUVMmp6WJw3maNaNbgekdekgCmagBpDjX8ji",
+      "tier": "seed",
+      "intel_score": 6.5,
+      "priority": "medium",
+      "notes": "Shared by Rao during the 2026-03-16 AlphaCore/SN66 announcement window as an early buyer to inspect."
+    },
+    {
+      "label": "SN66 Rao Lead 4",
+      "ss58": "5D7dtTC7H1vuGTqJdujHUxi8TmvoJadumwEMjstxgzpS4FHE",
+      "tier": "seed",
+      "intel_score": 6.5,
+      "priority": "medium",
+      "notes": "Shared by Rao during the 2026-03-16 AlphaCore/SN66 announcement window as an early buyer to inspect."
+    },
+    {
+      "label": "SN66 Hidden Alpha 1",
+      "ss58": "5FAGzHPVfKDN27MWi5Brt1Th6ysu2EVtsZRxaPEGuBvzFkVi",
+      "tier": "seed",
+      "intel_score": 6.0,
+      "priority": "medium",
+      "notes": "Shared by Rao as a wallet to inspect for linked hidden AlphaCore/SN66 exposure."
+    },
+    {
+      "label": "SN66 Hidden Alpha 2",
+      "ss58": "5GxCeeYZwRivS4rrwvdyznu6unnPpKwbP6ywbKczuXLYWT2N",
+      "tier": "seed",
+      "intel_score": 6.0,
+      "priority": "medium",
+      "notes": "Shared by Rao as a wallet to inspect for linked hidden AlphaCore/SN66 exposure."
+    },
+    {
+      "label": "SN66 Hidden Alpha 3",
+      "ss58": "5HKzyz8zGqpRG4pTuusDaN3Y4fD7fZ66iv2vVmkXDcAZg7mu",
+      "tier": "seed",
+      "intel_score": 6.0,
+      "priority": "medium",
+      "notes": "Shared by Rao as a wallet to inspect for linked hidden AlphaCore/SN66 exposure."
+    },
+    {
+      "label": "Legacy DSV Core",
+      "ss58": "5Ds8nuwoySJRwkXorzFv8MVWXeCzehCYVrjcsVtSGCPB8V4R",
+      "tier": "seed",
+      "intel_score": 7.5,
+      "priority": "high",
+      "notes": "Historical DSV wallet linked by operator to Siam Kidd and Mark Cresor. Track for old-cluster rediscovery and copycat precursor wallets, but do not assume the wallet is still primary."
+    }
+  ]
+}

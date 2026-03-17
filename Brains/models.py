@@ -22,6 +22,10 @@ class SignalSnapshot:
     confidence: float            # min(available_bars / ideal_bars, 1.0)
     tao_in_pool: float           # pool liquidity in TAO
     alpha_in_pool: float         # pool liquidity in alpha
+    ema_fast: float = 0.0
+    ema_fast_distance: float = 0.0
+    ema_fast_slope_6h: float = 0.0
+    ema_fast_slow_spread: float = 0.0
     net_flow_1d_tao: float = 0.0
     net_flow_7d_tao: float = 0.0
     net_flow_30d_tao: float = 0.0

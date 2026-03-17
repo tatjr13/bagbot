@@ -25,6 +25,8 @@ This file captures the current live Bagbot/Arbos operating model and the Targon 
 - Brains risk logic: `Brains/risk.py`
 - Brains integration layer: `Brains/integration.py`
 - Taostats helper: `Brains/taostats_api.py`
+- Wallet-intel tracker: `Brains/wallet_tracker.py`
+- Wallet-intel sidecar loop: `Brains/wallet_tracker_loop.py`
 - Offline replay harness: `Brains/research_harness.py`
 - Targon deploy helper for Arbos: `Brains/arbos/deploy.sh`
 
@@ -75,7 +77,9 @@ Useful commands on the Targon box:
 pm2 status
 pm2 restart bagbot-core
 pm2 restart bagbot-arbos
+pm2 restart bagbot-intel
 pm2 logs bagbot-arbos --lines 50 --nostream
+pm2 logs bagbot-intel --lines 50 --nostream
 tail -n 100 /data/bagbot/staking.log
 ```
 
@@ -96,6 +100,7 @@ tail -n 100 /data/bagbot/staking.log
 - Keep secrets in local `.env` files or remote-only runtime files, not in Git
 - Keep `/data/bagbot/bagbot_settings_overrides.py` and any password files at `600`
 - Treat Taostats as read-only research input
+- Treat wallet tracking as read-only intelligence. It may inform roster changes, but it must never trigger blind copy-trading or use a second wallet
 - Prefer the local replay harness and SQLite state before spending additional Chutes calls; once the account rolls into pay-as-you-go, local evaluation is the cheapest first pass
 - Falcon's standing mission is not just live trading; it also includes hourly universe sweeps, champion-vs-challenger research, and replay-backed improvement work during quiet market periods
 - Current Arbos Chutes routing is a frontier pool centered on `openai/gpt-oss-120b-TEE` with `MiniMax-M2.5-TEE`, `DeepSeek-V3.1-TEE`, and `Kimi-K2.5-TEE` as explicit fallbacks

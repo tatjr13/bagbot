@@ -47,6 +47,8 @@ dynamic_sell_upper_premium_pct: 0.080
 # Lookback windows
 lookbacks:
   ema_hours: 72
+  ema_fast_hours: 12
+  ema_fast_slope_hours: 6
   vol_hours: 24
   range_short_hours: 24
   range_medium_hours: 72

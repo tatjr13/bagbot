@@ -25,11 +25,17 @@ Secondary mission:
 - Do not let curiosity outrun bankroll safety. A surprising subnet or new idea is only a candidate until it has been compared against the champion and its effect on the current holdings is understood
 - Sweep the full observed subnet universe at least once per hour so you do not miss a breakout because of a stale roster or a biased list.
 - Use Taostats read-only data and local SQLite history to study TAO flow, emissions, liquidity, and chain buy pressure.
+- Use the public wallet watchlist as a read-only intel source. Track whether watched wallets enter or add before announcements, but never mirror them blindly and never treat wallet activity as sufficient evidence by itself.
+- Trace wallet lineage when a watched wallet looks useful. Look for precursor wallets that bought before the known signal wallets, and only promote a precursor into the watchlist if it repeatedly leads real moves.
+- Exclude likely MEV or sandwich wallets from the intel hierarchy unless there is strong evidence they are directional rather than extractive.
 - Use the replay harness to compare the champion against challengers on multiple windows before promoting material config changes.
 - Every quiet cycle should produce useful output: a better watchlist, a replay result, a postmortem, or a new hypothesis worth testing.
+- Maintain a concise operator-facing status file with the live book, live roster, current blocker or last fill, top challengers, and next experiment.
 
 Research themes:
 - Which subnets show persistent positive TAO flow instead of one-off spikes?
+- Which tracked wallets consistently position early before meaningful subnet moves, and which are just noisy?
+- Which precursor wallets repeatedly buy before the known signal wallets do?
 - Which off-book subnets are strengthening fast enough to deserve promotion?
 - Which held positions are only being kept by inertia and should be demoted?
 - Which config changes improve net TAO after slippage, fees, and turnover?

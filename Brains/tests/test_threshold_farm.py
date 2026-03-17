@@ -31,6 +31,10 @@ def make_snap(**overrides):
         confidence=1.0,
         tao_in_pool=5000.0,
         alpha_in_pool=5000.0,
+        ema_fast=1.0,
+        ema_fast_distance=0.0,
+        ema_fast_slope_6h=0.0,
+        ema_fast_slow_spread=0.0,
     )
     defaults.update(overrides)
     return SignalSnapshot(**defaults)
@@ -44,6 +48,15 @@ class TestRegimeClassification(unittest.TestCase):
 
     def test_bull(self):
         snap = make_snap(ema_slope_24h=0.02, spot_price=1.05, ema_72h=1.0)
+        self.assertEqual(classify_regime(snap), 'bull')
+
+    def test_fast_crossover_can_signal_bull(self):
+        snap = make_snap(
+            spot_price=1.02,
+            ema_fast=1.01,
+            ema_fast_slow_spread=0.01,
+            ema_fast_slope_6h=0.005,
+        )
         self.assertEqual(classify_regime(snap), 'bull')
 
     def test_bear(self):
@@ -218,11 +231,51 @@ class TestComputeThresholds(unittest.TestCase):
         self.assertIsNotNone(patch)
         # All thresholds should be positive
         self.assertGreater(patch.buy_lower, 0)
-        self.assertGreater(patch.buy_upper, 0)
-        self.assertGreater(patch.sell_lower, 0)
-        self.assertGreater(patch.sell_upper, 0)
-        # Buy band should be below sell band
-        self.assertLess(patch.buy_upper, patch.sell_lower)
+
+    def test_fast_flip_signal_nudges_buy_thresholds_higher(self):
+        neutral_snap = make_snap(
+            spot_price=1.0,
+            ema_72h=1.0,
+            ema_distance=-0.02,
+            ema_fast=0.99,
+            ema_fast_distance=0.01,
+            ema_fast_slope_6h=0.0,
+            ema_fast_slow_spread=0.0,
+            confidence=1.0,
+        )
+        flip_snap = make_snap(
+            spot_price=1.0,
+            ema_72h=1.0,
+            ema_distance=-0.02,
+            ema_fast=0.995,
+            ema_fast_distance=0.005,
+            ema_fast_slope_6h=0.01,
+            ema_fast_slow_spread=0.01,
+            confidence=1.0,
+        )
+        neutral_patch = compute_thresholds(
+            neutral_snap, self.state, self.preset,
+            original_grid={'max_alpha': 2000},
+            daily_buy_tao=0, daily_sell_tao=0,
+            portfolio_value_tao=100,
+            dry_run=True, now=self.now,
+        )
+        fresh_state = SubnetState(netuid=11, last_patch_at=self.now - 3600)
+        flip_patch = compute_thresholds(
+            flip_snap, fresh_state, self.preset,
+            original_grid={'max_alpha': 2000},
+            daily_buy_tao=0, daily_sell_tao=0,
+            portfolio_value_tao=100,
+            dry_run=True, now=self.now,
+        )
+        self.assertIsNotNone(neutral_patch)
+        self.assertIsNotNone(flip_patch)
+        self.assertGreater(flip_patch.buy_upper, neutral_patch.buy_upper)
+        self.assertIn('fast_flip=', flip_patch.reason)
+        self.assertGreater(flip_patch.buy_upper, 0)
+        self.assertGreater(flip_patch.sell_lower, 0)
+        self.assertGreater(flip_patch.sell_upper, 0)
+        self.assertLess(flip_patch.buy_upper, flip_patch.sell_lower)
 
     def test_zero_warmup_config_does_not_block_or_crash(self):
         snap = make_snap(confidence=0.2)

@@ -40,6 +40,8 @@ TEST_CFG = {
     'dynamic_sell_upper_premium_pct': 0.080,
     'lookbacks': {
         'ema_hours': 72,
+        'ema_fast_hours': 12,
+        'ema_fast_slope_hours': 6,
         'vol_hours': 24,
         'range_short_hours': 24,
         'range_medium_hours': 72,
@@ -222,6 +224,47 @@ class TestStrategyRuntimeRoster(unittest.TestCase):
 
         self.assertEqual(list(runtime_grids.keys()), [22])
         self.assertIn(22, engine.buy_roster_netuids)
+
+    def test_fast_turn_overlay_boosts_recovering_candidate_score(self):
+        engine = self._make_engine()
+        patch = SimpleNamespace(buy_upper=1.0, regime='chop')
+        recovering = SimpleNamespace(
+            ema_distance=-0.03,
+            ema_fast_distance=-0.01,
+            range_pos_24h=0.40,
+            volume_score=1.2,
+            tao_in_pool=6000.0,
+            confidence=0.20,
+            est_slippage_pct=0.10,
+            momentum_6h=0.01,
+            inventory_ratio=0.10,
+            ema_fast_slope_6h=0.02,
+            ema_fast_slow_spread=0.015,
+            net_flow_1d_tao=0.0,
+            net_flow_7d_tao=0.0,
+            ema_tao_flow_tao=0.0,
+            spot_price=0.97,
+        )
+        lagging = SimpleNamespace(
+            ema_distance=-0.03,
+            ema_fast_distance=0.005,
+            range_pos_24h=0.40,
+            volume_score=1.2,
+            tao_in_pool=6000.0,
+            confidence=0.20,
+            est_slippage_pct=0.10,
+            momentum_6h=0.01,
+            inventory_ratio=0.10,
+            ema_fast_slope_6h=-0.01,
+            ema_fast_slow_spread=-0.01,
+            net_flow_1d_tao=0.0,
+            net_flow_7d_tao=0.0,
+            ema_tao_flow_tao=0.0,
+            spot_price=0.97,
+        )
+        recovering_score = engine._candidate_score(recovering, patch, False, False, False)
+        lagging_score = engine._candidate_score(lagging, patch, False, False, False)
+        self.assertGreater(recovering_score, lagging_score)
 
     def test_stale_taostats_flow_snapshot_is_ignored(self):
         with patch.dict('os.environ', {'TAOSTATS_API_KEY': 'test-key'}, clear=False):

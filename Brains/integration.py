@@ -234,6 +234,7 @@ class StrategyEngine:
             buy_edge = max(0.0, (patch.buy_upper - snap.spot_price) / patch.buy_upper)
 
         discount_score = max(0.0, -snap.ema_distance)
+        fast_discount_bonus = max(0.0, -snap.ema_fast_distance) * 0.35
         range_score = max(0.0, 0.65 - snap.range_pos_24h) * 0.05
         volume_bonus = max(0.0, min(snap.volume_score - 1.0, 2.0)) * 0.03
         liquidity_bonus = min(max(snap.tao_in_pool / 5000.0, 0.0), 1.0) * 0.03
@@ -241,6 +242,15 @@ class StrategyEngine:
         slippage_penalty = min(max(snap.est_slippage_pct / 100.0, 0.0), 0.5)
         momentum_penalty = max(0.0, snap.momentum_6h) * 0.5
         inventory_penalty = snap.inventory_ratio * 0.10
+        fast_turn_bonus = max(0.0, snap.ema_fast_slope_6h) * 1.50
+        fast_crossover_bonus = max(0.0, snap.ema_fast_slow_spread) * 1.50
+        fast_headwind_penalty = (
+            max(0.0, -snap.ema_fast_slope_6h) * 0.75
+            + max(0.0, -snap.ema_fast_slow_spread) * 0.50
+        )
+        flip_alignment_bonus = 0.0
+        if snap.ema_distance < 0.0 and snap.ema_fast_slope_6h > 0.0:
+            flip_alignment_bonus = min(-snap.ema_distance, 0.05) * 0.80 + min(snap.ema_fast_slope_6h, 0.05) * 0.80
         flow_day_scale = max(float(self.cfg.get('taostats_flow_day_norm_tao', 500.0) or 500.0), 1.0)
         flow_week_scale = max(float(self.cfg.get('taostats_flow_week_norm_tao', 350.0) or 350.0), 1.0)
         flow_ema_scale = max(float(self.cfg.get('taostats_flow_ema_norm_tao', 0.01) or 0.01), 1e-6)
@@ -267,10 +277,14 @@ class StrategyEngine:
         score = (
             (buy_edge * 2.0)
             + discount_score
+            + fast_discount_bonus
             + range_score
             + volume_bonus
             + liquidity_bonus
             + confidence_bonus
+            + fast_turn_bonus
+            + fast_crossover_bonus
+            + flip_alignment_bonus
             + flow_bonus
             + flow_alignment_bonus
             + configured_bonus
@@ -279,6 +293,7 @@ class StrategyEngine:
             - slippage_penalty
             - momentum_penalty
             - inventory_penalty
+            - fast_headwind_penalty
             - flow_penalty
         )
         if patch.regime == 'pump':

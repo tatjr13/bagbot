@@ -101,3 +101,23 @@ python3 Brains/research_harness.py \
 ```
 
 Use this before promoting nontrivial `threshold_farm.yaml` changes into a live Targon runtime.
+
+## Wallet Intel
+
+Bagbot also ships with a read-only wallet tracker for Arbos. It snapshots watched wallets, records recent delegation activity, ranks precursor wallets that repeatedly move before the known signal wallets, and filters likely MEV noise.
+
+Example:
+
+```bash
+python3 Brains/wallet_tracker.py refresh --desktop-output ~/Desktop/WALLET_TRACKERS.md
+```
+
+Long-running sidecar:
+
+```bash
+python3 Brains/wallet_tracker_loop.py \
+  --report-mirror /data/bagbot-arbos/Arbos/context/WALLET_TRACKERS.md \
+  --status-mirror /data/bagbot-arbos/Arbos/context/ARBOS_STATUS.md
+```
+
+The seed list lives in `Brains/arbos/WALLET_TRACKERS_SEEDS.json`. The generated report is written to `Brains/arbos/WALLET_TRACKERS.md`.

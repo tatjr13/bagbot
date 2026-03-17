@@ -503,6 +503,50 @@ class TestBAGBot(unittest.TestCase):
         rotationTrade = bagbot.asyncio.run(bu.constructRotationTrade())
         self.assertIsNone(rotationTrade)
 
+    def testRotationTradeLogsNearMissDiagnostics(self):
+        args = {}
+        bagbot.bagbot_settings.ENABLE_POSITION_ROTATION = True
+        bagbot.bagbot_settings.ENABLE_ATOMIC_ROTATION = True
+        bagbot.bagbot_settings.MAX_PORTFOLIO_TAO = None
+        bagbot.bagbot_settings.MAX_TAO_PER_BUY = 0.05
+        bagbot.bagbot_settings.MAX_TAO_PER_SELL = 1.0
+
+        bu = bagbot.BittensorUtility(args)
+        bu.balance = 1.0
+        bu.stats = {
+            90: {'price': 0.009, 'tao_in': 10000, 'alpha_in': 10000},
+            91: {'price': 0.010, 'tao_in': 10000, 'alpha_in': 10000},
+        }
+        bu.current_stake_info = {
+            bagbot.bagbot_settings.STAKE_ON_VALIDATOR: {
+                91: MockStake(100),
+            }
+        }
+        bu.subnet_grids = {
+            90: {
+                'buy_lower': 0.0105,
+                'buy_upper': 0.011,
+                'sell_lower': 0.013,
+                'sell_upper': 0.014,
+                'max_alpha': 1000,
+            },
+            91: {
+                'buy_lower': 0.008,
+                'buy_upper': 0.009,
+                'sell_lower': 0.012,
+                'sell_upper': 0.013,
+                'max_alpha': 1000,
+            },
+        }
+        bu.sub = StubSub(MockSimSwapResult(tao_fee=0.05, dest_netuid=90))
+
+        with self.assertLogs(bagbot.logger, level='INFO') as cm:
+            rotationTrade = bagbot.asyncio.run(bu.constructRotationTrade())
+
+        self.assertIsNone(rotationTrade)
+        self.assertTrue(any('No qualifying rotation candidate. Near misses:' in line for line in cm.output))
+        self.assertTrue(any('sn91->sn90 net_edge' in line for line in cm.output))
+
     def testRotationTradeSkippedWithoutEnoughLiquidFeeBuffer(self):
         args = {}
         bagbot.bagbot_settings.ENABLE_POSITION_ROTATION = True
