@@ -10,6 +10,7 @@ from Brains.wallet_tracker import (
     WalletEvent,
     find_precursor_events,
     is_probable_mev_wallet,
+    merge_movement_history,
     merge_candidate_scores,
     refresh_tracker,
     select_active_wallets,
@@ -186,6 +187,41 @@ class TestWalletTracker(unittest.TestCase):
         )
         self.assertEqual([wallet["ss58"] for wallet in active], ["high", "p1", "p2", "m1"])
         self.assertEqual(cursor, 0)
+
+    def test_merge_movement_history_deduplicates_and_caps(self):
+        existing = [
+            {
+                "wallet_ss58": "seed-a",
+                "action": "DELEGATE",
+                "netuid": 66,
+                "amount_tao": 10.0,
+                "timestamp": "2026-03-17T05:00:00Z",
+                "extrinsic_id": "seed-a-1",
+            }
+        ]
+        new_events = [
+            {
+                "wallet_ss58": "seed-a",
+                "action": "DELEGATE",
+                "netuid": 66,
+                "amount_tao": 10.0,
+                "timestamp": "2026-03-17T05:00:00Z",
+                "extrinsic_id": "seed-a-1",
+            },
+            {
+                "wallet_ss58": "seed-b",
+                "action": "DELEGATE",
+                "netuid": 71,
+                "amount_tao": 11.0,
+                "timestamp": "2026-03-17T06:00:00Z",
+                "extrinsic_id": "seed-b-1",
+            },
+        ]
+
+        merged = merge_movement_history(existing, new_events, {"movement_history_max_entries": 1})
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["wallet_ss58"], "seed-b")
+        self.assertEqual(merged[0]["extrinsic_id"], "seed-b-1")
 
     @patch("Brains.wallet_tracker.fetch_subnet_events", return_value=[])
     @patch("Brains.wallet_tracker.fetch_wallet_events", return_value=[])

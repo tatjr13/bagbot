@@ -126,6 +126,25 @@ def _wallet_promotion_summary(wallet_report_path: Path) -> str:
     return f"wallet-intel precursor ranking is live; {derived_count} derived wallets are currently promoted into the active watchlist."
 
 
+def _wallet_recent_moves(wallet_report_path: Path, limit: int = 3) -> str:
+    if not wallet_report_path.exists():
+        return "wallet tracker report missing"
+    lines = wallet_report_path.read_text(encoding="utf-8").splitlines()
+    collected = []
+    in_moves = False
+    for line in lines:
+        if line.strip() == "## Recent Movement Ledger":
+            in_moves = True
+            continue
+        if in_moves and line.startswith("## "):
+            break
+        if in_moves and line.startswith("- "):
+            collected.append(line[2:].strip())
+            if len(collected) >= limit:
+                break
+    return " | ".join(collected) if collected else "no tracked wallet movements recorded yet"
+
+
 def build_status(log_path: Path, wallet_report_path: Path, tail_count: int) -> str:
     lines = tail_lines(log_path, tail_count)
     snapshot_line = _last_matching(lines, ('{wallet_value:"',))
@@ -159,6 +178,7 @@ def build_status(log_path: Path, wallet_report_path: Path, tail_count: int) -> s
     wallet_intel = _wallet_intel_top(wallet_report_path)
     wallet_meta = _wallet_intel_meta(wallet_report_path)
     promotion_summary = _wallet_promotion_summary(wallet_report_path)
+    recent_moves = _wallet_recent_moves(wallet_report_path)
 
     lines_out = [
         "# Arbos Status",
@@ -172,6 +192,7 @@ def build_status(log_path: Path, wallet_report_path: Path, tail_count: int) -> s
         f"- Main reason for no trade, if idle: {last_blocker}",
         f"- Top subnet challengers: current roster watchlist is [{buy_enabled}]",
         f"- Top wallet-intel challengers: {wallet_intel}",
+        f"- Recent tracked wallet moves: {recent_moves}",
         f"- Wallet-intel report generated: {wallet_meta}",
         f"- Current champion vs challenger work: {promotion_summary}",
         "- Next check or experiment: refresh wallet tracker on the next hourly cycle, compare precursor wallets against TAO-flow leaders, and keep watching for fee-buffer or rotation unlocks.",

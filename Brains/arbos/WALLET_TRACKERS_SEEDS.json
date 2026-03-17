@@ -9,6 +9,8 @@
   "max_dynamic_wallets": 8,
   "max_promoted_wallets_per_cycle": 3,
   "max_rotating_wallets_per_cycle": 3,
+  "movement_history_max_entries": 500,
+  "movement_history_report_limit": 20,
   "fetch_retry_attempts": 4,
   "fetch_retry_base_seconds": 15,
   "promotion": {

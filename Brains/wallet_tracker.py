@@ -19,7 +19,7 @@ DEFAULT_STATE_PATH = ROOT / "arbos" / "WALLET_TRACKERS_STATE.json"
 DEFAULT_REPORT_PATH = ROOT / "arbos" / "WALLET_TRACKERS.md"
 DEFAULT_DESKTOP_REPORT_PATH = Path.home() / "Desktop" / "WALLET_TRACKERS.md"
 DEFAULT_TIMEOUT_SECONDS = 20.0
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 if str(ROOT.parent) not in sys.path:
     sys.path.insert(0, str(ROOT.parent))
@@ -408,12 +408,57 @@ def _precursor_hit_id(hit: Dict) -> str:
     )
 
 
+def _movement_event_id(event: Dict) -> str:
+    return "|".join(
+        [
+            str(event.get("wallet_ss58", "")),
+            str(event.get("extrinsic_id", "")),
+            str(event.get("action", "")),
+            str(event.get("netuid", "")),
+            str(event.get("timestamp", "")),
+        ]
+    )
+
+
+def merge_movement_history(existing: List[Dict], new_events: List[Dict], cfg: Dict) -> List[Dict]:
+    max_entries = int(cfg.get("movement_history_max_entries", 500) or 500)
+    merged: Dict[str, Dict] = {}
+
+    for row in existing or []:
+        if not isinstance(row, dict):
+            continue
+        event_id = row.get("event_id") or _movement_event_id(row)
+        normalized = dict(row)
+        normalized["event_id"] = event_id
+        merged[event_id] = normalized
+
+    for row in new_events or []:
+        if not isinstance(row, dict):
+            continue
+        event_id = _movement_event_id(row)
+        normalized = dict(row)
+        normalized["event_id"] = event_id
+        merged[event_id] = normalized
+
+    ranked = sorted(
+        merged.values(),
+        key=lambda row: (
+            row.get("timestamp", ""),
+            row.get("wallet_ss58", ""),
+            row.get("extrinsic_id", ""),
+        ),
+        reverse=True,
+    )
+    return ranked[: max(max_entries, 0)]
+
+
 def render_report(
     cfg: Dict,
     wallet_snapshots: Dict[str, Dict],
     candidates: Dict,
     promoted: List[Dict],
     filtered_mev: List[Dict],
+    movement_history: List[Dict],
     generated_at: datetime,
 ) -> str:
     seeds = {wallet["ss58"]: wallet for wallet in cfg.get("wallets", [])}
@@ -468,6 +513,26 @@ def render_report(
         lines.append(f"   - ss58: `{ss58}`")
         lines.append(f"   - latest: {latest_text}")
         lines.append(f"   - top positions: {top_positions}")
+
+    lines.extend(
+        [
+            "",
+            "## Recent Movement Ledger",
+            "",
+        ]
+    )
+    if not movement_history:
+        lines.append("- No tracked wallet movements recorded yet.")
+    else:
+        report_limit = int(cfg.get("movement_history_report_limit", 20) or 20)
+        for row in movement_history[: max(report_limit, 0)]:
+            label = row.get("label") or seeds.get(row["wallet_ss58"], {}).get("label") or row["wallet_ss58"]
+            handle = row.get("handle") or seeds.get(row["wallet_ss58"], {}).get("handle")
+            lines.append(
+                f"- `{row['timestamp']}` | **{label}**"
+                + (f" `{handle}`" if handle else "")
+                + f" | {row['action']} sn{row['netuid']} {float(row.get('amount_tao', 0.0)):.2f} TAO"
+            )
 
     lines.extend(
         [
@@ -543,7 +608,7 @@ def refresh_tracker(
     force: bool,
 ) -> Dict:
     cfg = load_json(config_path, {})
-    state = load_json(state_path, {"meta": {}, "wallet_snapshots": {}, "candidates": {}})
+    state = load_json(state_path, {"meta": {}, "wallet_snapshots": {}, "candidates": {}, "movement_history": []})
     meta = state.get("meta", {})
     if int(meta.get("state_schema_version", 0) or 0) < STATE_SCHEMA_VERSION:
         state = {
@@ -553,6 +618,7 @@ def refresh_tracker(
             },
             "wallet_snapshots": {},
             "candidates": {},
+            "movement_history": [],
         }
 
     generated_at = now_utc()
@@ -571,8 +637,10 @@ def refresh_tracker(
 
     wallet_snapshots: Dict[str, Dict] = {}
     candidates = state.get("candidates", {})
+    movement_history = state.get("movement_history", [])
     subnet_cache: Dict[int, List[WalletEvent]] = {}
     tracked_events_for_analysis: List[WalletEvent] = []
+    recent_wallet_movements: List[Dict] = []
 
     os.environ["WALLET_TRACKER_FETCH_RETRY_ATTEMPTS"] = str(
         int(cfg.get("fetch_retry_attempts", 4) or 4)
@@ -605,6 +673,23 @@ def refresh_tracker(
                 for event in events[:10]
             ],
         }
+        recent_wallet_movements.extend(
+            [
+                {
+                    "wallet_ss58": wallet_ss58,
+                    "label": wallet.get("label"),
+                    "handle": wallet.get("handle"),
+                    "tier": wallet.get("tier", "derived"),
+                    "action": event.action,
+                    "netuid": event.netuid,
+                    "amount_tao": round(event.amount_tao, 6),
+                    "timestamp": dt_to_iso(event.timestamp),
+                    "extrinsic_id": event.extrinsic_id,
+                    "delegate_name": event.delegate_name,
+                }
+                for event in events
+            ]
+        )
         tracked_events_for_analysis.extend(
             recent_delegate_events(events, float(cfg.get("tracked_event_lookback_hours", 24) or 24))
         )
@@ -633,8 +718,9 @@ def refresh_tracker(
         if lead_count and (mev_flags / lead_count) >= 0.5:
             filtered_mev.append(candidate)
     filtered_mev.sort(key=lambda row: (-int(row.get("mev_flags", 0)), -float(row.get("intel_score", 0.0))))
+    movement_history = merge_movement_history(movement_history, recent_wallet_movements, cfg)
 
-    report = render_report(cfg, wallet_snapshots, candidates, promoted, filtered_mev, generated_at)
+    report = render_report(cfg, wallet_snapshots, candidates, promoted, filtered_mev, movement_history, generated_at)
     report_output.parent.mkdir(parents=True, exist_ok=True)
     report_output.write_text(report, encoding="utf-8")
     if desktop_output:
@@ -648,10 +734,12 @@ def refresh_tracker(
             "tracked_wallet_count": len(active_wallets),
             "candidate_count": len(candidates),
             "promoted_count": len(promoted),
+            "movement_history_count": len(movement_history),
             "wallet_cursor": next_wallet_cursor,
         },
         "wallet_snapshots": wallet_snapshots,
         "candidates": candidates,
+        "movement_history": movement_history,
         "report_markdown": report,
     }
     write_json(state_path, state)

@@ -37,6 +37,11 @@ class TestArbosStatus(unittest.TestCase):
                         "2. **Derived A** | tier=`derived` | intel_score=`5.00`",
                         "3. **Derived B** | tier=`derived` | intel_score=`4.50`",
                         "",
+                        "## Recent Movement Ledger",
+                        "",
+                        "- `2026-03-17T06:10:00Z` | **Seed** | DELEGATE sn66 12.00 TAO",
+                        "- `2026-03-17T06:05:00Z` | **Derived A** | UNDELEGATE sn71 4.00 TAO",
+                        "",
                         "## Ranked Precursor Candidates",
                         "",
                         "1. `wallet-a` | score=`5.00` | lead_count=`2` | mev_ratio=`0.00`",
@@ -49,6 +54,7 @@ class TestArbosStatus(unittest.TestCase):
             status = build_status(log_path=log_path, wallet_report_path=wallet_report, tail_count=100)
             self.assertIn("2 derived wallets are currently promoted into the active watchlist.", status)
             self.assertIn("Wallet-intel report generated: `2026-03-17T06:16:12Z`", status)
+            self.assertIn("Recent tracked wallet moves: `2026-03-17T06:10:00Z` | **Seed** | DELEGATE sn66 12.00 TAO", status)
 
 
 if __name__ == "__main__":
