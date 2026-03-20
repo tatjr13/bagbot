@@ -9,11 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+from Brains.arbos_task_board import task_snapshot
+
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_LOG_PATH = ROOT.parent / "staking.log"
 DEFAULT_WALLET_REPORT_PATH = ROOT / "arbos" / "WALLET_TRACKERS.md"
 DEFAULT_OUTPUT_PATH = ROOT / "arbos" / "ARBOS_STATUS.md"
+DEFAULT_TASKS_PATH = ROOT / "arbos" / "ARBOS_TASKS.md"
 
 WALLET_VALUE_RE = re.compile(r'\{wallet_value:"(?P<staked>[0-9.]+) \+ (?P<liquid>[0-9.]+)", (?P<body>.*)\}')
 ROSTER_RE = re.compile(
@@ -27,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-path", default=str(DEFAULT_LOG_PATH))
     parser.add_argument("--wallet-report", default=str(DEFAULT_WALLET_REPORT_PATH))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH))
+    parser.add_argument("--tasks", default=str(DEFAULT_TASKS_PATH))
     parser.add_argument("--tail-lines", type=int, default=4000)
     return parser.parse_args()
 
@@ -145,7 +149,7 @@ def _wallet_recent_moves(wallet_report_path: Path, limit: int = 3) -> str:
     return " | ".join(collected) if collected else "no tracked wallet movements recorded yet"
 
 
-def build_status(log_path: Path, wallet_report_path: Path, tail_count: int) -> str:
+def build_status(log_path: Path, wallet_report_path: Path, tail_count: int, tasks_path: Path | None = None) -> str:
     lines = tail_lines(log_path, tail_count)
     snapshot_line = _last_matching(lines, ('{wallet_value:"',))
     roster_line = _last_matching(lines, ("Brains runtime roster refreshed:",))
@@ -179,11 +183,21 @@ def build_status(log_path: Path, wallet_report_path: Path, tail_count: int) -> s
     wallet_meta = _wallet_intel_meta(wallet_report_path)
     promotion_summary = _wallet_promotion_summary(wallet_report_path)
     recent_moves = _wallet_recent_moves(wallet_report_path)
+    snapshot = task_snapshot(tasks_path) if tasks_path and tasks_path.exists() else {
+        "focus": "none",
+        "active_titles": [],
+        "queued_titles": [],
+        "active_count": 0,
+        "queued_count": 0,
+    }
 
     lines_out = [
         "# Arbos Status",
         "",
         f"- Updated at: {updated_at}",
+        f"- Focus Arbos task: {snapshot['focus']}",
+        f"- Active task board: {snapshot['active_count']} active | {snapshot['active_titles'] or ['none']}",
+        f"- Queued task board: {snapshot['queued_count']} queued | {snapshot['queued_titles'] or ['none']}",
         f"- Current holdings: {holdings}",
         f"- Current live roster: {live_roster}",
         f"- Buy-enabled: {buy_enabled}",
@@ -206,6 +220,7 @@ def main() -> int:
         log_path=Path(args.log_path),
         wallet_report_path=Path(args.wallet_report),
         tail_count=args.tail_lines,
+        tasks_path=Path(args.tasks),
     )
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -38,6 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from Brains.arbos_status import build_status
+from Brains.arbos_task_board import promote_queued_task, task_snapshot
 from Brains.wallet_tracker import refresh_tracker
 
 
@@ -54,6 +55,7 @@ DEFAULT_WALLET_REPORT_PATH = CONTROL_ROOT / "REPORTS" / "wallet-intel.md"
 DEFAULT_TASKS_PATH = CONTROL_ROOT / "TASKS.md"
 DEFAULT_RUNS_DIR = CONTROL_ROOT / "RUNS"
 DEFAULT_LATEST_RESPONSE = CONTROL_ROOT / "LATEST_RESPONSE.md"
+DEFAULT_OUTBOX_PATH = CONTROL_ROOT / "OUTBOX.md"
 
 
 def utc_now() -> datetime:
@@ -204,6 +206,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tasks", default=str(DEFAULT_TASKS_PATH))
     parser.add_argument("--status", default=str(DEFAULT_STATUS_PATH))
     parser.add_argument("--wallet-report", default=str(DEFAULT_WALLET_REPORT_PATH))
+    parser.add_argument("--outbox", default=str(DEFAULT_OUTBOX_PATH))
     parser.add_argument("--log-path", default=str(DEFAULT_LOG_PATH))
     parser.add_argument("--runs-dir", default=str(DEFAULT_RUNS_DIR))
     parser.add_argument("--latest-response", default=str(DEFAULT_LATEST_RESPONSE))
@@ -221,6 +224,7 @@ def main() -> int:
     tasks_path = Path(args.tasks)
     status_path = Path(args.status)
     wallet_report_path = Path(args.wallet_report)
+    outbox_path = Path(args.outbox)
     log_path = Path(args.log_path)
     runs_dir = Path(args.runs_dir)
     latest_response_path = Path(args.latest_response)
@@ -252,14 +256,19 @@ def main() -> int:
         now = time.time()
         try:
             if now - last_status >= max(args.status_seconds, 1.0):
+                promoted, focus_title = promote_queued_task(tasks_path, outbox_path=outbox_path)
                 status_markdown = build_status(
                     log_path=log_path,
                     wallet_report_path=wallet_report_path,
                     tail_count=int(args.status_tail_lines),
+                    tasks_path=tasks_path,
                 )
                 write_text(status_path, status_markdown)
                 last_status = now
-                log_line(loop_log_path, "status refreshed")
+                if promoted and focus_title:
+                    log_line(loop_log_path, f"status refreshed | promoted task={focus_title}")
+                else:
+                    log_line(loop_log_path, "status refreshed")
 
             if now - last_wallet >= max(args.wallet_seconds, 1.0):
                 refresh_tracker(
@@ -275,6 +284,7 @@ def main() -> int:
                     log_path=log_path,
                     wallet_report_path=wallet_report_path,
                     tail_count=int(args.status_tail_lines),
+                    tasks_path=tasks_path,
                 )
                 write_text(status_path, status_markdown)
                 last_status = now
@@ -288,7 +298,18 @@ def main() -> int:
                 status = read_text(status_path, "Status file missing.")
                 wallets = clip(read_text(wallet_report_path, "Wallet report missing."), 12000)
                 recent_log = clip(tail_text(log_path, int(args.log_lines)), 8000)
-                user_prompt = build_loop_prompt(goal, status, tasks, wallets, recent_log)
+                snapshot = task_snapshot(tasks_path)
+                user_prompt = build_loop_prompt(
+                    goal,
+                    status,
+                    tasks,
+                    wallets,
+                    "Focus task: "
+                    f"{snapshot['focus']}\n"
+                    f"Active titles: {snapshot['active_titles']}\n"
+                    f"Queued titles: {snapshot['queued_titles']}\n\n"
+                    f"{recent_log}",
+                )
 
                 stamp = utc_now().strftime("%Y%m%d_%H%M%S")
                 prompt_out = runs_dir / f"{stamp}_prompt.md"
