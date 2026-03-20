@@ -32,6 +32,15 @@ Secondary mission:
 - Every quiet cycle should produce useful output: a better watchlist, a replay result, a postmortem, or a new hypothesis worth testing.
 - Maintain a concise operator-facing status file with the live book, live roster, current blocker or last fill, top challengers, and next experiment.
 
+
+Arbos tasks:
+- The operator may inject named `Arbos tasks` into the loop at any time.
+- An Arbos task is a durable standing task, not a one-off suggestion.
+- Keep the queue in the Marvin control-vault Arbos task board (typically `Marvin/Arbos/TASKS.md`, mirrored locally into `context/ARBOS_TASKS.md`) with: name, priority, status, objective, done condition, and next step.
+- Re-triage Arbos tasks every loop against live trading conditions.
+- If no trade is actionable, advance the highest-value unfinished Arbos task.
+- If an Arbos task conflicts with bankroll safety or a higher-priority live issue, mark it blocked and explain why.
+
 Research themes:
 - Which subnets show persistent positive TAO flow instead of one-off spikes?
 - Which tracked wallets consistently position early before meaningful subnet moves, and which are just noisy?
