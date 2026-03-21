@@ -122,6 +122,19 @@ def build_loop_prompt(goal: str, status: str, tasks: str, wallets: str, recent_l
     )
 
 
+def fallback_response(reason: str, focus_task: str) -> str:
+    return (
+        "## Loop Read\n"
+        f"External reasoning did not complete cleanly: {reason}\n\n"
+        "## Decision\n"
+        "Keep the loop alive, preserve the current task focus, and retry on the next cadence.\n\n"
+        "## Arbos Task Update\n"
+        f"Focus task remains `{focus_task}`.\n\n"
+        "## Next Step\n"
+        "Use the existing status and task board, then retry automatically on the next scheduled cycle.\n"
+    )
+
+
 def call_chutes(
     *,
     api_key: str,
@@ -185,7 +198,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the terminal-first Arbos loop.")
     parser.add_argument("--cycle-seconds", type=float, default=15.0)
     parser.add_argument("--status-seconds", type=float, default=30.0)
-    parser.add_argument("--wallet-seconds", type=float, default=900.0)
+    parser.add_argument("--wallet-seconds", type=float, default=0.0)
     parser.add_argument("--chutes-seconds", type=float, default=60.0)
     parser.add_argument("--log-lines", type=int, default=40)
     parser.add_argument("--status-tail-lines", type=int, default=4000)
@@ -271,7 +284,7 @@ def main() -> int:
                 else:
                     log_line(loop_log_path, "status refreshed")
 
-            if now - last_wallet >= max(args.wallet_seconds, 1.0):
+            if args.wallet_seconds > 0 and now - last_wallet >= args.wallet_seconds:
                 refresh_tracker(
                     config_path=wallet_config_path,
                     state_path=wallet_state_path,
@@ -294,11 +307,11 @@ def main() -> int:
 
             if now - last_chutes >= max(args.chutes_seconds, 1.0):
                 goal = read_text(goal_path, "Goal file missing.")
-                system_prompt = read_text(prompt_path, "You are Arbos.")
+                system_prompt = clip(read_text(prompt_path, "You are Arbos."), 9000)
                 tasks = read_text(tasks_path, "No Arbos tasks configured.")
                 status = read_text(status_path, "Status file missing.")
-                wallets = clip(read_text(wallet_report_path, "Wallet report missing."), 12000)
-                recent_log = clip(tail_text(log_path, int(args.log_lines)), 8000)
+                wallets = clip(read_text(wallet_report_path, "Wallet report missing."), 8000)
+                recent_log = clip(tail_text(log_path, int(args.log_lines)), 4000)
                 snapshot = task_snapshot(tasks_path)
                 log_line(loop_log_path, f"starting chutes cycle | focus={snapshot['focus']}")
                 user_prompt = build_loop_prompt(
@@ -312,6 +325,7 @@ def main() -> int:
                     f"Queued titles: {snapshot['queued_titles']}\n\n"
                     f"{recent_log}",
                 )
+                user_prompt = clip(user_prompt, 12000)
 
                 stamp = utc_now().strftime("%Y%m%d_%H%M%S")
                 prompt_out = runs_dir / f"{stamp}_prompt.md"
@@ -332,17 +346,21 @@ def main() -> int:
                         "## Next Step\nExport CHUTES_API_KEY and restart the loop.\n"
                     )
                 else:
-                    response = call_chutes(
-                        api_key=api_key,
-                        model=args.model,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        base_url=args.base_url,
-                        temperature=float(args.temperature),
-                        max_tokens=int(args.max_tokens),
-                        timeout=float(args.chutes_timeout),
-                        retries=int(args.chutes_retries),
-                    )
+                    try:
+                        response = call_chutes(
+                            api_key=api_key,
+                            model=args.model,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            base_url=args.base_url,
+                            temperature=float(args.temperature),
+                            max_tokens=int(args.max_tokens),
+                            timeout=float(args.chutes_timeout),
+                            retries=int(args.chutes_retries),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        response = fallback_response(str(exc), str(snapshot["focus"]))
+                        log_line(loop_log_path, f"chutes cycle fallback | reason={exc}")
 
                 response_out = runs_dir / f"{stamp}_response.md"
                 write_text(response_out, response)

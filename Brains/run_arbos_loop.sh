@@ -21,9 +21,9 @@ cd "$ROOT_DIR"
 exec python3 arbos_terminal_loop.py \
   --cycle-seconds 12 \
   --status-seconds 30 \
-  --wallet-seconds 300 \
+  --wallet-seconds 0 \
   --chutes-seconds 24 \
-  --chutes-timeout 45 \
+  --chutes-timeout 25 \
   --chutes-retries 1 \
-  --max-tokens 900 \
+  --max-tokens 700 \
   --log-path "$PROJECT_ROOT/staking.log"

@@ -1,5 +1,5 @@
 {
-  "refresh_minutes": 60,
+  "refresh_minutes": 15,
   "tracked_event_lookback_hours": 24,
   "tracked_event_limit": 24,
   "subnet_event_limit": 120,
