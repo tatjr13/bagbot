@@ -36,6 +36,7 @@ DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from Brains.arbos_control_surface import sync_root_views
 from Brains.arbos_status import build_status
 from Brains.arbos_task_board import promote_queued_task, task_snapshot
 from Brains.wallet_tracker import refresh_tracker
@@ -56,6 +57,7 @@ DEFAULT_RUNS_DIR = CONTROL_ROOT / "RUNS"
 DEFAULT_LATEST_RESPONSE = CONTROL_ROOT / "LATEST_RESPONSE.md"
 DEFAULT_OUTBOX_PATH = CONTROL_ROOT / "OUTBOX.md"
 DEFAULT_LOOP_LOG = CONTROL_ROOT / "LOOP.log"
+DEFAULT_WALLET_STATUS_PATH = CONTROL_ROOT / "WALLET_INTEL_STATUS.md"
 
 
 def utc_now() -> datetime:
@@ -224,6 +226,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs-dir", default=str(DEFAULT_RUNS_DIR))
     parser.add_argument("--latest-response", default=str(DEFAULT_LATEST_RESPONSE))
     parser.add_argument("--loop-log", default=str(DEFAULT_LOOP_LOG))
+    parser.add_argument("--wallet-status", default=str(DEFAULT_WALLET_STATUS_PATH))
     parser.add_argument("--wallet-config", default=str(ARBOS_DIR / "WALLET_TRACKERS_SEEDS.json"))
     parser.add_argument("--wallet-state", default=str(ARBOS_DIR / "WALLET_TRACKERS_STATE.json"))
     return parser.parse_args()
@@ -242,6 +245,7 @@ def main() -> int:
     runs_dir = Path(args.runs_dir)
     latest_response_path = Path(args.latest_response)
     loop_log_path = Path(args.loop_log)
+    wallet_status_path = Path(args.wallet_status)
     wallet_config_path = Path(args.wallet_config)
     wallet_state_path = Path(args.wallet_state)
 
@@ -278,6 +282,12 @@ def main() -> int:
                     tasks_path=tasks_path,
                 )
                 write_text(status_path, status_markdown)
+                sync_root_views(
+                    control_root=status_path.parent,
+                    tasks_text=read_text(tasks_path, "No Arbos tasks configured."),
+                    status_text=status_markdown,
+                    wallet_status_text=read_text(wallet_status_path, ""),
+                )
                 last_status = now
                 if promoted and focus_title:
                     log_line(loop_log_path, f"status refreshed | promoted task={focus_title}")
@@ -301,6 +311,12 @@ def main() -> int:
                     tasks_path=tasks_path,
                 )
                 write_text(status_path, status_markdown)
+                sync_root_views(
+                    control_root=status_path.parent,
+                    tasks_text=read_text(tasks_path, "No Arbos tasks configured."),
+                    status_text=status_markdown,
+                    wallet_status_text=read_text(wallet_status_path, ""),
+                )
                 last_status = now
                 last_wallet = now
                 log_line(loop_log_path, "wallet intel refreshed")

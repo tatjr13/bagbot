@@ -149,6 +149,37 @@ def _wallet_recent_moves(wallet_report_path: Path, limit: int = 3) -> str:
     return " | ".join(collected) if collected else "no tracked wallet movements recorded yet"
 
 
+def _wallet_status_fields(wallet_report_path: Path) -> dict[str, str]:
+    status_path = wallet_report_path.parent.parent / "WALLET_INTEL_STATUS.md"
+    if not status_path.exists():
+        return {}
+    fields: dict[str, str] = {}
+    for line in status_path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("- "):
+            continue
+        key, _, value = line[2:].partition(":")
+        if not _:
+            continue
+        fields[key.strip().lower()] = value.strip()
+    return fields
+
+
+def _wallet_sidecar_summary(wallet_report_path: Path) -> str:
+    fields = _wallet_status_fields(wallet_report_path)
+    if not fields:
+        return "wallet-intel sidecar status missing"
+    parts = [fields.get("state", "unknown")]
+    if fields.get("last completed"):
+        parts.append(f"last completed {fields['last completed']}")
+    elif fields.get("last started"):
+        parts.append(f"started {fields['last started']}")
+    if fields.get("next planned run"):
+        parts.append(f"next {fields['next planned run']}")
+    if fields.get("last error"):
+        parts.append(f"error {fields['last error']}")
+    return " | ".join(parts)
+
+
 def build_status(log_path: Path, wallet_report_path: Path, tail_count: int, tasks_path: Path | None = None) -> str:
     lines = tail_lines(log_path, tail_count)
     snapshot_line = _last_matching(lines, ('{wallet_value:"',))
@@ -181,6 +212,7 @@ def build_status(log_path: Path, wallet_report_path: Path, tail_count: int, task
     last_blocker = f"{_extract_timestamp(last_blocker_line)} | {last_blocker_line}" if last_blocker_line else "none found"
     wallet_intel = _wallet_intel_top(wallet_report_path)
     wallet_meta = _wallet_intel_meta(wallet_report_path)
+    wallet_sidecar = _wallet_sidecar_summary(wallet_report_path)
     promotion_summary = _wallet_promotion_summary(wallet_report_path)
     recent_moves = _wallet_recent_moves(wallet_report_path)
     snapshot = task_snapshot(tasks_path) if tasks_path and tasks_path.exists() else {
@@ -206,6 +238,7 @@ def build_status(log_path: Path, wallet_report_path: Path, tail_count: int, task
         f"- Main reason for no trade, if idle: {last_blocker}",
         f"- Top subnet challengers: current roster watchlist is [{buy_enabled}]",
         f"- Top wallet-intel challengers: {wallet_intel}",
+        f"- Wallet-intel sidecar: {wallet_sidecar}",
         f"- Recent tracked wallet moves: {recent_moves}",
         f"- Wallet-intel report generated: {wallet_meta}",
         f"- Current champion vs challenger work: {promotion_summary}",
