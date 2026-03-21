@@ -30,7 +30,6 @@ CONTROL_ROOT_CANDIDATES = (
 DEFAULT_LOG_PATH = PROJECT_ROOT / "staking.log"
 DEFAULT_GOAL_PATH = ARBOS_DIR / "FALCON_GOAL.md"
 DEFAULT_PROMPT_PATH = ARBOS_DIR / "PROMPT.md"
-DEFAULT_LOOP_LOG = ARBOS_DIR / "arbos_terminal_loop.log"
 DEFAULT_CHUTES_BASE_URL = "https://llm.chutes.ai/v1/chat/completions"
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
 
@@ -56,6 +55,7 @@ DEFAULT_TASKS_PATH = CONTROL_ROOT / "TASKS.md"
 DEFAULT_RUNS_DIR = CONTROL_ROOT / "RUNS"
 DEFAULT_LATEST_RESPONSE = CONTROL_ROOT / "LATEST_RESPONSE.md"
 DEFAULT_OUTBOX_PATH = CONTROL_ROOT / "OUTBOX.md"
+DEFAULT_LOOP_LOG = CONTROL_ROOT / "LOOP.log"
 
 
 def utc_now() -> datetime:
@@ -247,8 +247,9 @@ def main() -> int:
         print(warning, flush=True)
         log_line(loop_log_path, warning)
 
+    startup_now = time.time()
     last_status = 0.0
-    last_wallet = 0.0
+    last_wallet = startup_now if not args.wallet_force_first else 0.0
     last_chutes = 0.0
     force_wallet = bool(args.wallet_force_first)
 
@@ -299,6 +300,7 @@ def main() -> int:
                 wallets = clip(read_text(wallet_report_path, "Wallet report missing."), 12000)
                 recent_log = clip(tail_text(log_path, int(args.log_lines)), 8000)
                 snapshot = task_snapshot(tasks_path)
+                log_line(loop_log_path, f"starting chutes cycle | focus={snapshot['focus']}")
                 user_prompt = build_loop_prompt(
                     goal,
                     status,

@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal", default=str(default_root / "arbos" / "FALCON_GOAL.md"))
     parser.add_argument("--status", default=str(control_root / "STATUS.md"))
     parser.add_argument("--wallets", default=str(control_root / "REPORTS" / "wallet-intel.md"))
-    parser.add_argument("--log", default=str(default_root.parent / "staking.log"))
+    parser.add_argument("--log", default=str(control_root / "LOOP.log"))
     parser.add_argument("--log-lines", type=int, default=20)
     return parser.parse_args()
 
