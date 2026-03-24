@@ -1,0 +1,32 @@
+{
+  "name": "Const",
+  "description": "Nova SN68 mining agent — autonomous protein folding miner supervisor",
+  "model": {
+    "provider": "chutes",
+    "baseUrl": "https://llm.chutes.ai/v1",
+    "model": "Qwen/Qwen3.5-72B-A10B",
+    "apiKeyEnv": "CHUTES_API_KEY"
+  },
+  "telegram": {
+    "botToken": "${CONST_TELEGRAM_BOT_TOKEN}",
+    "chatId": "${CONST_TELEGRAM_CHAT_ID}"
+  },
+  "workspace": {
+    "root": "/root/clawd",
+    "agentsFile": "Nova/AGENTS.md",
+    "soulFile": "Nova/SOUL.md"
+  },
+  "extensions": [
+    {
+      "path": "./extensions/nova-sn68",
+      "config": {
+        "novaDir": "/root/clawd/Nova",
+        "loopScript": "/root/clawd/Brains/run_nova_loop.sh",
+        "sshHost": "swift-shark-ff",
+        "liumPod": "",
+        "commandTimeoutMs": 120000
+      }
+    }
+  ],
+  "port": 18789
+}

@@ -1,0 +1,31 @@
+{
+  "id": "nova-sn68",
+  "name": "Nova SN68 Miner",
+  "description": "Supervise the Nova SN68 mining agent loop.  Provides start/stop/status/directive/telemetry tools and relays urgent OUTBOX items via Telegram.",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "novaDir": {
+        "type": "string",
+        "description": "Path to the Nova workspace directory (contains STATUS.md, OUTBOX.md, etc.)"
+      },
+      "loopScript": {
+        "type": "string",
+        "description": "Path to run_nova_loop.sh or nova_mining_loop.py"
+      },
+      "sshHost": {
+        "type": "string",
+        "description": "SSH host for the GPU pod (default: swift-shark-ff)"
+      },
+      "liumPod": {
+        "type": "string",
+        "description": "Lium pod ID if using lium SSH"
+      },
+      "commandTimeoutMs": {
+        "type": "number",
+        "default": 120000,
+        "description": "Timeout for shell commands in milliseconds"
+      }
+    }
+  }
+}

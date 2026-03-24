@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenClaw Const Gateway (Nova SN68)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/clawd
+Environment=NODE_ENV=production
+EnvironmentFile=-/root/.secrets/mining/shared_api.env
+ExecStart=/usr/local/bin/openclaw serve --config /root/clawd/openclaw_nova.json
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
