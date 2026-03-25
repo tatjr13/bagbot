@@ -42,11 +42,13 @@ class PodSSH:
 
     def run(self, cmd: str, *, timeout: int = 30) -> SSHResult:
         """Execute *cmd* on the pod and return the result."""
+        # Source /etc/environment so env vars set on the pod are visible
+        wrapped = f"source /etc/environment 2>/dev/null; {cmd}"
         if self.cfg.lium_pod:
-            full_cmd = ["lium", "ssh", self.cfg.lium_pod, "--", "bash", "-lc", cmd]
+            full_cmd = ["lium", "exec", self.cfg.lium_pod, "--", wrapped]
         else:
             ssh_args = self._ssh_base_args()
-            full_cmd = ssh_args + [cmd]
+            full_cmd = ssh_args + [wrapped]
 
         started = time.perf_counter()
         try:

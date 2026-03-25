@@ -204,12 +204,13 @@ def fetch_chain_state(ssh: PodSSH, netuid: int = NETUID_SN68) -> ChainState:
 import json, bittensor as bt
 sub = bt.Subtensor('finney')
 block = int(sub.block)
-tempo = int(sub.query_module('SubtensorModule', 'Tempo', [{netuid}]))
-epoch_length = tempo + 1  # public validator uses tempo+1 (winner_block // 361)
+raw = sub.query_module('SubtensorModule', 'Tempo', [{netuid}])
+tempo = int(raw.value if hasattr(raw, 'value') else raw)
+epoch_length = tempo + 1
 blocks_into_epoch = block % epoch_length
 blocks_until_epoch_end = epoch_length - blocks_into_epoch
-blocks_into_tempo = block % tempo
-blocks_until_tempo_end = tempo - blocks_into_tempo
+blocks_into_tempo = block % tempo if tempo > 0 else 0
+blocks_until_tempo_end = (tempo - blocks_into_tempo) if tempo > 0 else 0
 print(json.dumps({{
     'block': block, 'tempo': tempo, 'epoch_length': epoch_length,
     'blocks_into_epoch': blocks_into_epoch,
