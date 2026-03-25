@@ -2,18 +2,19 @@
  * Nova SN68 mining agent plugin for OpenClaw.
  *
  * SDK contract (current docs):
- *   - Default-export an entry object built with definePluginEntry(...)
- *   - Tools use async execute(_id, params), not handler
+ *   - Import definePluginEntry from openclaw/plugin-sdk/plugin-entry
+ *   - Tools use async execute(_id, params)
+ *   - Services use { id, start, stop } shape
  *   - Ship openclaw.plugin.json manifest
  *   - 5 tools, 1 background service, 1 hook
  */
 
-import { definePluginEntry } from "openclaw";
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { resolveConfig } from "./config.js";
 import { Supervisor } from "./supervisor.js";
 import type { NovaSn68Config } from "./types.js";
 
-// PluginApi shape from the SDK — typed inline until openclaw ships @types
+// PluginApi shape — typed inline until openclaw ships @types
 interface PluginApi {
   pluginConfig?: Partial<NovaSn68Config>;
   logger: {
@@ -36,10 +37,9 @@ interface PluginApi {
     execute: (id: string, params: Record<string, unknown>) => Promise<unknown>;
   }): void;
   registerService(service: {
-    name: string;
-    description: string;
-    intervalMs: number;
-    execute: () => Promise<void>;
+    id: string;
+    start: () => Promise<void>;
+    stop: () => Promise<void>;
   }): void;
   on(
     event: string,
@@ -181,23 +181,37 @@ export default definePluginEntry({
     });
 
     // ── background service: OUTBOX relay ─────────────────────────
-    // Polls OUTBOX.md periodically and relays urgent items.
-    // Runs independently of conversation turns.
+    // Uses the { id, start, stop } shape from the SDK.
+    // start() sets up a polling interval; stop() tears it down.
+
+    let outboxPollHandle: ReturnType<typeof setInterval> | null = null;
 
     api.registerService({
-      name: "nova-outbox-relay",
-      description:
-        "Poll Nova OUTBOX.md for urgent items and relay via Telegram",
-      intervalMs: 30_000, // 30 seconds
-      async execute() {
-        const outbox = supervisor.readOutbox();
-        if (!outbox.hasUrgent) return;
+      id: "nova-outbox-relay",
 
-        for (const item of outbox.urgentItems) {
-          api.logger.warn(`[NOVA URGENT] ${item}`);
+      async start() {
+        api.logger.info("nova-outbox-relay service starting (30s poll)");
+        outboxPollHandle = setInterval(async () => {
+          try {
+            const outbox = supervisor.readOutbox();
+            if (!outbox.hasUrgent) return;
+
+            for (const item of outbox.urgentItems) {
+              api.logger.warn(`[NOVA URGENT] ${item}`);
+            }
+            supervisor.clearOutbox();
+          } catch (err) {
+            api.logger.error(`outbox relay error: ${err}`);
+          }
+        }, 30_000);
+      },
+
+      async stop() {
+        if (outboxPollHandle) {
+          clearInterval(outboxPollHandle);
+          outboxPollHandle = null;
         }
-
-        supervisor.clearOutbox();
+        api.logger.info("nova-outbox-relay service stopped");
       },
     });
 

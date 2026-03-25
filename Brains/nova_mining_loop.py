@@ -4,7 +4,7 @@
 Chain-aware architecture:
   - Health timer   (wall-clock, 15-30s) — GPU, miner, GitHub, labels, auto-restart
   - Strategy timer (chain-aware)        — fires in submission window (≤20 blocks before epoch end)
-  - Research timer (tempo-aligned)      — fires at tempo boundaries (~360 blocks / 72 min)
+  - Research timer (epoch-aligned)      — fires at epoch boundaries (~361 blocks / ~72 min)
 
 File-based interface (Nova/ workspace) syncs with OpenClaw "Const".
 SQLite is the source of truth; markdown views are rendered from it.
@@ -293,58 +293,96 @@ def write_outbox_if_needed(
 def check_github_health(ssh: PodSSH) -> dict[str, Any]:
     """Check GitHub API accessibility on the pod.
 
-    Nova submission uses GITHUB_REPO_* env vars and upload_file_to_github()
-    to push encrypted payloads.  We test the same layer: whether the
-    GitHub token is valid and the target repo is reachable via the API.
-    Probing local git state (git push --dry-run) is wrong because Nova
-    doesn't use local git for submission.
+    Nova submission uses GITHUB_REPO_OWNER, GITHUB_REPO_NAME,
+    GITHUB_REPO_BRANCH, and optional GITHUB_REPO_PATH to build the
+    upload target, then calls upload_file_to_github(filename, content).
+    The miner raises if owner/repo/branch are missing.
+
+    We validate the same env vars and test the actual API path the
+    miner constructs (Contents API for the configured branch/path).
     """
     result: dict[str, Any] = {"ok": False}
 
-    # 1. Check that the required env vars are set on the pod
+    # 1. Read all required env vars from the pod in one call
     env_check = ssh.run(
-        'echo "REPO_OWNER=${GITHUB_REPO_OWNER:-unset} '
-        'REPO_NAME=${GITHUB_REPO_NAME:-unset} '
-        'TOKEN=${GITHUB_TOKEN:+set}"',
+        'printf "OWNER=%s\\nNAME=%s\\nBRANCH=%s\\nPATH=%s\\nTOKEN=%s\\n" '
+        '"${GITHUB_REPO_OWNER:-}" '
+        '"${GITHUB_REPO_NAME:-}" '
+        '"${GITHUB_REPO_BRANCH:-}" '
+        '"${GITHUB_REPO_PATH:-}" '
+        '"${GITHUB_TOKEN:+set}"',
         timeout=10,
     )
+    env_vars: dict[str, str] = {}
     if env_check.ok:
-        out = env_check.stdout
-        result["repo_owner"] = "unset" not in out.split("REPO_OWNER=")[1].split()[0] if "REPO_OWNER=" in out else False
-        result["repo_name"] = "unset" not in out.split("REPO_NAME=")[1].split()[0] if "REPO_NAME=" in out else False
-        result["token_set"] = "TOKEN=set" in out
-    else:
-        result["repo_owner"] = False
-        result["repo_name"] = False
-        result["token_set"] = False
+        for line in env_check.stdout.strip().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                env_vars[k] = v
 
-    # 2. Test actual GitHub API access with the token
+    result["repo_owner"] = bool(env_vars.get("OWNER"))
+    result["repo_name"] = bool(env_vars.get("NAME"))
+    result["repo_branch"] = env_vars.get("BRANCH", "")
+    result["repo_path"] = env_vars.get("PATH", "")
+    result["token_set"] = env_vars.get("TOKEN") == "set"
+
+    # Nova raises if owner, name, or branch are missing
+    missing = []
+    if not result["repo_owner"]:
+        missing.append("GITHUB_REPO_OWNER")
+    if not result["repo_name"]:
+        missing.append("GITHUB_REPO_NAME")
+    if not result.get("repo_branch"):
+        missing.append("GITHUB_REPO_BRANCH")
+    if not result["token_set"]:
+        missing.append("GITHUB_TOKEN")
+
+    if missing:
+        result["error"] = f"missing env vars: {', '.join(missing)}"
+        return result
+
+    owner = env_vars["OWNER"]
+    name = env_vars["NAME"]
+    branch = env_vars["BRANCH"]
+    path = env_vars.get("PATH", "")
+
+    # 2. Validate repo + branch exists via API
     api_check = ssh.run(
-        'curl -sf -o /dev/null -w "%{http_code}" '
-        '-H "Authorization: token $GITHUB_TOKEN" '
-        '"https://api.github.com/repos/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME" '
-        '2>/dev/null || echo "000"',
+        f'curl -sf -o /dev/null -w "%{{http_code}}" '
+        f'-H "Authorization: token $GITHUB_TOKEN" '
+        f'"https://api.github.com/repos/{owner}/{name}/branches/{branch}" '
+        f'2>/dev/null || echo "000"',
         timeout=15,
     )
-    if api_check.ok:
-        status_code = api_check.stdout.strip()
-        result["api_status"] = status_code
-        result["api_ok"] = status_code == "200"
+    branch_status = api_check.stdout.strip() if api_check.ok else "error"
+    result["branch_status"] = branch_status
+    result["branch_ok"] = branch_status == "200"
+
+    if not result["branch_ok"]:
+        result["error"] = f"branch '{branch}' not found (API {branch_status})"
+        return result
+
+    # 3. Validate the contents path the miner uses for upload
+    # Nova constructs: /repos/{owner}/{name}/contents/{path}/{filename}
+    # We check that the path directory is accessible
+    if path:
+        path_check = ssh.run(
+            f'curl -sf -o /dev/null -w "%{{http_code}}" '
+            f'-H "Authorization: token $GITHUB_TOKEN" '
+            f'"https://api.github.com/repos/{owner}/{name}/contents/{path}?ref={branch}" '
+            f'2>/dev/null || echo "000"',
+            timeout=15,
+        )
+        path_status = path_check.stdout.strip() if path_check.ok else "error"
+        result["path_status"] = path_status
+        result["path_ok"] = path_status == "200"
+        if not result["path_ok"]:
+            result["error"] = f"contents path '{path}' not found (API {path_status})"
+            return result
     else:
-        result["api_status"] = "error"
-        result["api_ok"] = False
+        result["path_ok"] = True  # no path configured = root, always valid
 
-    result["ok"] = result.get("token_set", False) and result.get("api_ok", False)
-    if not result["ok"]:
-        parts = []
-        if not result.get("token_set"):
-            parts.append("GITHUB_TOKEN not set")
-        if not result.get("repo_owner") or not result.get("repo_name"):
-            parts.append("GITHUB_REPO_OWNER/NAME not set")
-        if not result.get("api_ok"):
-            parts.append(f"API returned {result.get('api_status', '?')}")
-        result["error"] = "; ".join(parts)
-
+    result["ok"] = True
     return result
 
 
@@ -445,7 +483,7 @@ def run_research_cycle(
     safety: SafetyGate,
     start_time: float,
 ) -> dict[str, Any]:
-    """Deep research cycle — fires at tempo boundaries."""
+    """Deep research cycle — fires at epoch boundaries (where validator sets weights)."""
     if safety.is_paused:
         return {"skipped": True, "reason": safety.pause_reason}
 
@@ -605,7 +643,7 @@ def main() -> int:
         f"nova-loop starting | "
         f"health={cfg.timers.health_seconds}s (wall-clock) | "
         f"strategy=chain-aware (fallback {cfg.timers.strategy_seconds}s) | "
-        f"research=tempo-aligned (fallback {cfg.timers.research_seconds}s) | "
+        f"research=epoch-aligned (fallback {cfg.timers.research_seconds}s) | "
         f"budget={cfg.llm.budget_per_day}"
     )
     print(startup_msg, flush=True)

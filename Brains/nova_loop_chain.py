@@ -2,12 +2,14 @@
 
 Queries Bittensor subtensor for block, epoch, and tempo state.
 Strategy fires based on epoch position (submission window), not wall clock.
-Attribution matures on tempo boundaries, not fixed minute windows.
+Attribution matures on epoch boundaries, not fixed minute windows.
 
 SN68 specifics:
 - Blocks are ~12 seconds
+- epoch_length = tempo + 1 (public validator: current_block % epoch_length == 0)
+- current_epoch = current_block // epoch_length - 1
 - Submission window: ≤20 blocks before epoch end
-- Tempo: ~360 blocks (~72 min) — rewards distributed at tempo boundary
+- Weights set at epoch boundary (current_block % epoch_length == 0)
 - Strategy should evaluate during submission window, not on a fixed timer
 """
 
@@ -40,7 +42,7 @@ class ChainState:
     blocks_into_tempo: int = 0
     blocks_until_tempo_end: int = 0
     in_submission_window: bool = False
-    at_tempo_boundary: bool = False
+    at_epoch_boundary: bool = False
     fetched_at: float = 0.0
     error: str = ""
 
@@ -75,13 +77,16 @@ class ChainAwareScheduler:
 
     Health timer stays wall-clock (deterministic, no chain dependency).
     Strategy fires when in the submission window (≤20 blocks before epoch end).
-    Research fires at tempo boundaries or on a wall-clock fallback.
+    Research fires at epoch boundaries (where weights are set), not tempo.
+
+    The public validator sets weights when current_block % epoch_length == 0
+    and derives current_epoch = current_block // epoch_length - 1.
     """
 
     # Config
     submission_window_blocks: int = SUBMISSION_WINDOW_BLOCKS
     min_blocks_between_strategy: int = 5  # rate-limit within submission window
-    tempo_boundary_tolerance_blocks: int = 5  # fire research within N blocks after boundary
+    epoch_boundary_tolerance_blocks: int = 5  # fire research within N blocks after epoch boundary
     strategy_fallback_seconds: float = 300.0  # 5 min fallback if chain unavailable
     research_fallback_seconds: float = 7200.0 # 2h fallback
 
@@ -90,7 +95,7 @@ class ChainAwareScheduler:
     last_strategy_time: float = 0.0
     last_research_block: int = 0
     last_research_time: float = 0.0
-    last_research_tempo_number: int = -1  # which tempo we last ran research in
+    last_research_epoch_number: int = -1  # which epoch we last ran research in
 
     # Last chain state for status rendering
     last_chain_state: ChainState = field(default_factory=ChainState)
@@ -134,10 +139,9 @@ class ChainAwareScheduler:
     def should_run_research(self, chain: ChainState) -> tuple[bool, str]:
         """Check if research cycle should fire.
 
-        Primary: fire AFTER a tempo boundary (rewards just distributed),
-        specifically in the first ``tempo_boundary_tolerance_blocks``
-        blocks of a new tempo.  We track by tempo number so we fire
-        exactly once per boundary.
+        Primary: fire AFTER an epoch boundary (where the validator sets
+        weights: current_block % epoch_length == 0).  We track by epoch
+        number so we fire exactly once per boundary.
 
         Fallback: wall-clock if chain unavailable or no boundary in a while.
         """
@@ -149,25 +153,29 @@ class ChainAwareScheduler:
                 return True, "wall-clock fallback (chain unavailable)"
             return False, "waiting (chain unavailable, fallback not due)"
 
-        # Compute which tempo number we are in (monotonically increasing)
-        current_tempo_number = chain.current_block // chain.tempo if chain.tempo > 0 else 0
+        # current_epoch = current_block // epoch_length (validator uses -1, but
+        # for boundary detection the integer division is what matters)
+        current_epoch_number = (
+            chain.current_block // chain.epoch_length
+            if chain.epoch_length > 0 else 0
+        )
 
-        # Just crossed a tempo boundary? (first N blocks of new tempo)
-        if (chain.blocks_into_tempo <= self.tempo_boundary_tolerance_blocks
-                and current_tempo_number != self.last_research_tempo_number):
-            return True, f"tempo boundary (tempo #{current_tempo_number}, block {chain.current_block})"
+        # Just crossed an epoch boundary? (first N blocks of new epoch)
+        if (chain.blocks_into_epoch <= self.epoch_boundary_tolerance_blocks
+                and current_epoch_number != self.last_research_epoch_number):
+            return True, f"epoch boundary (epoch #{current_epoch_number}, block {chain.current_block})"
 
         # Fallback: haven't researched in a while
         if now - self.last_research_time >= self.research_fallback_seconds:
-            return True, "wall-clock fallback (no recent tempo boundary)"
+            return True, "wall-clock fallback (no recent epoch boundary)"
 
-        return False, f"waiting for tempo boundary ({chain.blocks_until_tempo_end} blocks)"
+        return False, f"waiting for epoch boundary ({chain.blocks_until_epoch_end} blocks)"
 
     def record_research_run(self, chain: ChainState) -> None:
         self.last_research_block = chain.current_block
         self.last_research_time = time.time()
-        if chain.ok and chain.tempo > 0:
-            self.last_research_tempo_number = chain.current_block // chain.tempo
+        if chain.ok and chain.epoch_length > 0:
+            self.last_research_epoch_number = chain.current_block // chain.epoch_length
 
     def status_dict(self) -> dict[str, Any]:
         c = self.last_chain_state
@@ -233,7 +241,7 @@ print(json.dumps({{
             blocks_into_tempo=data["blocks_into_tempo"],
             blocks_until_tempo_end=blocks_until_tempo_end,
             in_submission_window=blocks_until_epoch_end <= SUBMISSION_WINDOW_BLOCKS,
-            at_tempo_boundary=data["blocks_into_tempo"] <= 5,  # just past boundary
+            at_epoch_boundary=data["blocks_into_epoch"] <= 5,  # just past epoch boundary
             fetched_at=now,
         )
     except Exception as exc:
@@ -242,15 +250,18 @@ print(json.dumps({{
 
 
 def compute_attribution_window(chain: ChainState) -> int:
-    """Compute attribution window in minutes aligned to tempo boundaries.
+    """Compute attribution window in minutes aligned to epoch boundaries.
 
-    Instead of a fixed 30-min window, we wait until the next tempo boundary
-    (when rewards are actually distributed) to evaluate outcomes.
+    The validator sets weights at epoch boundaries (current_block %
+    epoch_length == 0).  We wait until the next epoch boundary plus one
+    additional epoch to capture the weight-setting outcome.
     """
     if not chain.ok:
-        return 72  # fallback: one full tempo (~72 min)
+        return 73  # fallback: one full epoch (~73 min at epoch_length=361)
 
-    seconds_to_tempo = chain.blocks_until_tempo_end * BLOCK_TIME_SECONDS
-    # Add one extra tempo to ensure we capture the reward distribution
-    minutes = (seconds_to_tempo // 60) + (chain.tempo * BLOCK_TIME_SECONDS // 60)
+    seconds_to_epoch_end = chain.blocks_until_epoch_end * BLOCK_TIME_SECONDS
+    # Add one extra epoch to ensure we capture the weight distribution
+    seconds_per_epoch = chain.epoch_length * BLOCK_TIME_SECONDS
+    total_seconds = seconds_to_epoch_end + seconds_per_epoch
+    minutes = total_seconds // 60
     return max(int(minutes), 30)  # floor at 30 min

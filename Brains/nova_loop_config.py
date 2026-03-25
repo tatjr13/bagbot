@@ -32,8 +32,11 @@ def resolve_nova_dir() -> Path:
     if override:
         return Path(override)
     for candidate in NOVA_DIR_CANDIDATES:
-        if candidate.exists():
-            return candidate
+        try:
+            if candidate.exists():
+                return candidate
+        except PermissionError:
+            continue
     return ROOT / "Nova"
 
 
